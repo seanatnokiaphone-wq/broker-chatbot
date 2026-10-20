@@ -1,0 +1,1971 @@
+<title>Broker ChatBot</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<style>
+/* Layout: control-room console. Status rail on top, workspace (graph | explorer) left, chat column right; stacks on phones. Deliberately dark-only. */
+:root {
+  --page: #0c0e10;
+  --panel: #15181b;
+  --raised: #1d2125;
+  --line: #262b30;
+  --line-2: #343a41;
+  --ink: #eceeef;
+  --ink-2: #b9bfc5;
+  --muted: #7f878f;
+  --accent: #3b8be6;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #9085e9;
+  --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+  --font: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body { background: var(--page); color: var(--ink); font: 14px/1.45 var(--font); }
+button { font: inherit; color: inherit; cursor: pointer; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+
+.app { height: 100%; display: flex; flex-direction: column; }
+.topbar { display: flex; align-items: center; gap: 20px; padding-block: 10px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; white-space: nowrap; }
+.brand svg { color: var(--accent); }
+.demo-pill { font-size: 11px; color: var(--warning); border: 1px solid rgba(250,178,25,.45); border-radius: 999px; padding: 1px 8px; font-weight: 500; }
+.stats { display: flex; gap: 22px; flex: 1; flex-wrap: wrap; min-width: 0; }
+.stat { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.stat-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.stat-value { font-weight: 500; font-variant-numeric: tabular-nums; }
+.led { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--good); box-shadow: 0 0 6px var(--good); }
+.led.bad { background: var(--critical); box-shadow: 0 0 6px var(--critical); }
+#spark { width: 96px; height: 26px; display: block; }
+.fault-btn { display: flex; align-items: center; gap: 6px; background: var(--raised); border: 1px solid var(--line-2); border-radius: 8px; padding: 5px 10px; font-size: 12.5px; }
+.fault-btn:hover { border-color: var(--critical); }
+.fault-wrap { position: relative; }
+.fault-menu { position: absolute; right: 0; top: calc(100% + 6px); background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 6px; z-index: 20; width: 280px; display: flex; flex-direction: column; gap: 2px; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+.fault-menu button { text-align: left; background: none; border: none; border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+.fault-menu button:hover { background: var(--raised); }
+
+.main { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 420px; min-height: 0; }
+.workspace { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.tabs { display: flex; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--line); align-items: center; }
+.tabs button { display: flex; align-items: center; gap: 6px; background: none; border: 1px solid transparent; border-radius: 8px; padding: 6px 10px; color: var(--muted); }
+.tabs button[aria-selected="true"] { background: var(--raised); border-color: var(--line-2); color: var(--ink); }
+.tabs { flex-wrap: wrap; }
+.tabs .hint { margin-left: auto; font-size: 12px; color: var(--muted); }
+.graph-tools { display: flex; gap: 8px; align-items: center; }
+#tree-tools { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.search.tree-filter { margin: 0; padding: 4px 8px; width: 250px; max-width: 100%; }
+.view { flex: 1; min-height: 0; position: relative; }
+#view-graph:not([hidden]) { display: flex; }
+.graph-main { position: relative; flex: 1; min-width: 0; }
+.cards { flex: none; width: 360px; display: flex; flex-direction: column; gap: 8px; padding: 10px; border-left: 1px solid var(--line); min-height: 0; }
+.cards[hidden] { display: none; }
+.cards-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.cards-head .btns { display: flex; gap: 6px; }
+.cards-head .btn { padding: 3px 9px; font-size: 11.5px; white-space: nowrap; }
+.cards-scroll { overflow-y: auto; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.card { flex: none; background: var(--panel); border: 1px solid var(--line-2); border-radius: 12px; padding: 10px 12px 8px; display: flex; flex-direction: column; gap: 4px; }
+.card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--ink-2); word-break: break-all; }
+.card-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.card .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.card .v.bad { color: var(--critical); }
+.card .seg button { padding: 2px 8px; font-size: 11px; }
+.card-foot { display: flex; justify-content: space-between; align-items: center; }
+.card-foot .btn.mini { padding: 2px 8px; font-size: 11px; }
+.card .state-timeline { padding: 4px 0; gap: 6px; }
+.card .st-label { display: none; }
+.toolbar-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.zoom-controls { display: flex; align-items: center; gap: 2px; border: 1px solid var(--line-2); border-radius: 8px; padding: 2px; }
+.zoom-controls button { background: none; border: none; color: var(--ink-2); border-radius: 6px; padding: 2px 8px; font-size: 13px; min-width: 26px; }
+.zoom-controls button:hover:not(:disabled) { background: var(--raised); color: var(--ink); }
+.zoom-controls button:disabled { opacity: .35; cursor: default; }
+.zoom-controls .reset.on { color: var(--accent); }
+.zoom-controls .zoom-range { padding: 0 6px; }
+.zoom-controls.compact { align-self: flex-start; border: none; padding: 0; }
+.gap-summary { color: var(--good); } .gap-summary.bad { color: #e66767; }
+.json-view { margin: 4px 0; padding: 8px 10px; background: var(--page); border: 1px solid var(--line); border-radius: 8px; font-family: "IBM Plex Mono", monospace; font-size: 11.5px; line-height: 1.45; color: var(--ink-2); max-height: 340px; overflow: auto; white-space: pre; }
+.json-view .j-key { color: #9ec5f4; } .json-view .j-str { color: #8fd3b6; } .json-view .j-num { color: #f0c674; } .json-view .j-lit { color: #e598b8; }
+@media (max-width: 900px) { #view-graph:not([hidden]) { flex-direction: column; } .cards { width: auto; max-height: 45%; border-left: none; border-top: 1px solid var(--line); } }
+
+/* Graph */
+#graph { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+.legend { position: absolute; left: 12px; bottom: 12px; display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--ink-2); background: rgba(21,24,27,.9); padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); max-width: calc(100% - 24px); }
+.legend span { display: flex; align-items: center; gap: 5px; }
+.legend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.hover-card { position: absolute; left: 12px; top: 12px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 10px 12px; max-width: min(360px, calc(100% - 24px)); pointer-events: none; }
+.hover-card .v { font-size: 20px; font-weight: 600; margin: 2px 0; font-variant-numeric: tabular-nums; }
+.detail { position: absolute; right: 12px; top: 12px; width: 360px; max-width: calc(100% - 24px); background: var(--panel); border: 1px solid var(--line-2); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+.detail-head { display: flex; justify-content: space-between; gap: 8px; align-items: start; word-break: break-all; }
+.detail .v { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.detail .v.bad { color: var(--critical); }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn { display: inline-flex; align-items: center; gap: 6px; background: var(--raised); border: 1px solid var(--line-2); border-radius: 8px; padding: 5px 10px; font-size: 12.5px; }
+.btn:hover { border-color: var(--accent); }
+.icon-btn { background: none; border: none; color: var(--muted); padding: 4px; border-radius: 6px; line-height: 0; }
+.icon-btn:hover { color: var(--ink); background: var(--raised); }
+
+/* Explorer */
+.explorer { position: absolute; inset: 0; display: grid; grid-template-columns: minmax(260px, 360px) minmax(0, 1fr); }
+.tree-col { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.search { display: flex; align-items: center; gap: 6px; margin: 10px; padding: 6px 10px; border: 1px solid var(--line-2); border-radius: 8px; color: var(--muted); }
+.search input { background: none; border: none; outline: none; color: var(--ink); flex: 1; font: inherit; min-width: 0; }
+#tree { overflow-y: auto; flex: 1; padding-bottom: 12px; }
+.row { display: flex; align-items: center; gap: 6px; padding: 3px 10px 3px 8px; cursor: pointer; font-size: 13px; color: var(--ink-2); border: none; background: none; width: 100%; text-align: left; }
+.row:hover { background: var(--raised); }
+.row.picked { background: rgba(59,139,230,.12); }
+.row.branch { color: var(--ink); font-weight: 500; }
+.row .dot { width: 8px; height: 8px; border-radius: 50%; border: 1px solid var(--line-2); flex: none; }
+.row .chev { width: 10px; flex: none; color: var(--muted); font-size: 10px; }
+.row .val { margin-left: auto; font: 12px var(--mono); color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.row .val.bad { color: var(--critical); }
+.row.text-topic { cursor: default; }
+.chart-col { padding: 12px 16px; min-width: 0; overflow-y: auto; }
+.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 8px; flex-wrap: wrap; }
+.seg { display: flex; border: 1px solid var(--line-2); border-radius: 8px; overflow: hidden; }
+.seg button { background: none; border: none; padding: 5px 12px; color: var(--muted); font-size: 12px; }
+.seg button[aria-pressed="true"] { background: var(--raised); color: var(--ink); }
+.empty { color: var(--muted); padding: 60px 0; text-align: center; }
+.state-timeline { display: flex; flex-direction: column; gap: 12px; padding: 10px 4px; }
+.st-row { display: flex; flex-direction: column; gap: 4px; }
+.st-label { color: var(--ink-2); }
+.st-track { position: relative; height: 22px; background: var(--panel-2, #1d2125); border-radius: 4px; overflow: hidden; }
+.st-seg { position: absolute; top: 0; bottom: 0; border-right: 1px solid var(--page); }
+.st-empty { position: absolute; inset: 0; display: grid; place-items: center; }
+.st-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--ink-2); }
+.st-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.st-legend i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.st-axis { display: flex; justify-content: space-between; }
+
+/* Charts */
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart .unit { font-size: 11px; color: var(--muted); }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11.5px; color: var(--ink-2); margin: 2px 0 10px 40px; }
+.chart-legend span { display: flex; align-items: center; gap: 6px; }
+.chart-legend i { width: 12px; height: 2px; border-radius: 1px; display: inline-block; }
+.tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--line-2); border-radius: 8px; padding: 6px 8px; font-size: 12px; white-space: nowrap; z-index: 5; }
+.tip .t { color: var(--muted); margin-bottom: 2px; }
+.tip div span { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+
+/* Chat */
+.chat { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+.chat-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.chat-head .title { font-weight: 600; }
+#messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+.suggest { display: flex; flex-direction: column; gap: 8px; }
+.suggest button { text-align: left; background: var(--raised); border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+.suggest button:hover { border-color: var(--accent); }
+.notice { font-size: 12.5px; color: var(--ink-2); background: rgba(250,178,25,.08); border: 1px solid rgba(250,178,25,.35); border-radius: 8px; padding: 8px 10px; }
+.msg { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.msg.user { align-self: flex-end; max-width: 85%; background: var(--raised); border: 1px solid var(--line-2); border-radius: 12px 12px 4px 12px; padding: 8px 12px; }
+.md { min-width: 0; overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md p { margin: 0 0 8px; }
+.md ul, .md ol { margin: 0 0 8px; padding-left: 20px; }
+.md h1, .md h2, .md h3 { font-size: 14px; margin: 10px 0 6px; }
+.md code { font-family: var(--mono); font-size: 12px; background: var(--raised); padding: 1px 4px; border-radius: 4px; }
+.md .tbl { overflow-x: auto; margin-bottom: 8px; }
+.md table { border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.md th, .md td { border: 1px solid var(--line-2); padding: 3px 6px; text-align: left; }
+.chip { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; font: 11px var(--mono); color: var(--muted); background: var(--page); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; max-width: 100%; }
+.chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip.done::before { content: "✓"; color: var(--good); }
+.chip.bad { border-color: var(--critical); }
+.chip.run::before { content: ""; width: 8px; height: 8px; border: 1.5px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
+.chat-chart { background: var(--page); border: 1px solid var(--line); border-radius: 10px; padding: 8px 8px 0; }
+.chat-chart .title { font-size: 12px; font-weight: 500; margin: 0 0 4px 4px; }
+.thinking { color: var(--muted); font-size: 13px; }
+.err { color: #e66767; font-size: 12.5px; }
+.composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); padding-bottom: max(12px, env(safe-area-inset-bottom, 0px)); }
+.composer textarea { flex: 1; resize: none; background: var(--page); border: 1px solid var(--line-2); border-radius: 10px; color: var(--ink); padding: 8px 10px; font: inherit; outline: none; min-width: 0; }
+.composer textarea:focus { border-color: var(--accent); }
+.send { width: 36px; height: 36px; align-self: flex-end; border-radius: 50%; border: none; background: var(--accent); color: #fff; display: grid; place-items: center; flex: none; }
+.send:disabled { background: var(--line-2); color: var(--muted); cursor: not-allowed; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .chip.run::before { animation: none; } }
+
+@media (max-width: 900px) {
+  html, body { height: auto; }
+  .app { height: auto; min-height: 100%; }
+  .main { grid-template-columns: minmax(0, 1fr); }
+  .workspace { height: 72vh; }
+  .chat { height: 85vh; border-left: none; border-top: 1px solid var(--line); }
+  .explorer { grid-template-columns: minmax(0, 1fr); grid-template-rows: 42% 58%; }
+  .tree-col { border-right: none; border-bottom: 1px solid var(--line); }
+  .tabs .hint { display: none; }
+  .stats { gap: 10px 18px; order: 3; flex-basis: 100%; }
+  .fault-wrap { margin-left: auto; }
+}
+.spc-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 2px; }
+.spc .good, .spc-cap .good, .spc-status.good { color: var(--good); }
+.spc-status.bad, .spc-cap .bad { color: #e66767; }
+.spc-cap .warn { color: var(--warning); }
+.spc-cap { display: flex; flex-wrap: wrap; gap: 4px 10px; padding-top: 2px; }
+.spc-label { font-size: 11px; margin-top: 2px; }
+.md a.topic-link { color: var(--accent); text-decoration: none; border-bottom: 1px dashed rgba(57,135,229,.5); cursor: pointer; }
+.md a.topic-link:hover { border-bottom-style: solid; }
+.md a.topic-link code { color: inherit; }
+.related { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin-top: 8px; }
+.related-chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line-2); background: transparent; color: #c3c2b7; cursor: pointer; }
+.related-chip:hover { border-color: var(--accent); color: var(--accent); }
+.related-chip.all { color: var(--accent); }
+.btn.mini.on { border-color: var(--accent); color: var(--accent); }
+</style>
+
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="2.5"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 4.9a10 10 0 0 0 0 14.2M19.1 4.9a10 10 0 0 1 0 14.2"/></svg>
+      Broker ChatBot <span class="demo-pill">Demo</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><span class="led"></span><div><div class="stat-label">Broker</div><div class="stat-value mono small">sim://acme-dublin</div></div></div>
+      <div class="stat"><div><div class="stat-label">Topics</div><div class="stat-value" id="st-topics">0</div></div></div>
+      <div class="stat"><div><div class="stat-label">Msgs/s</div><div class="stat-value" id="st-mps">0</div></div><svg id="spark" aria-hidden="true"></svg></div>
+      <div class="stat"><div><div class="stat-label">History</div><div class="stat-value" id="st-hist">0 min</div></div></div>
+      <div class="stat" id="st-alarm-wrap"><span class="led" id="st-alarm-led"></span><div><div class="stat-label">Alarms</div><div class="stat-value" id="st-alarms">None</div></div></div>
+    </div>
+    <div class="fault-wrap">
+      <button class="fault-btn" id="fault-btn" aria-haspopup="true" aria-expanded="false">⚡ Inject fault</button>
+      <div class="fault-menu" id="fault-menu" hidden></div>
+    </div>
+  </header>
+
+  <div class="main">
+    <section class="workspace">
+      <nav class="tabs" role="tablist">
+        <button role="tab" id="tab-graph" aria-selected="true">◉ Topic graph</button>
+        <button role="tab" id="tab-explorer" aria-selected="false">☰ Explorer &amp; trends</button>
+        <span class="hint" id="tab-hint">Drag to pan, scroll to zoom, click a tag for details</span>
+        <div class="graph-tools" id="graph-tools">
+          <div class="seg" id="layout" aria-label="Graph layout">
+            <button data-l="force" aria-pressed="true">Network</button>
+            <button data-l="tree" aria-pressed="false">Tree →</button>
+          </div>
+          <label class="search tree-filter"><span aria-hidden="true">⌕</span><input id="tree-filter" placeholder="Search: temp, line2, Down, +/+/+/+/+/motor_temp" aria-label="Search topics"></label><span class="small muted" id="tree-count"></span>
+          <span id="tree-tools" hidden><button class="btn" id="expand-all">Expand all</button> <button class="btn" id="collapse-all">Collapse all</button></span>
+        </div>
+      </nav>
+      <div class="view" id="view-graph">
+        <div class="graph-main" id="graph-main">
+          <canvas id="graph"></canvas>
+          <div class="legend" id="legend"></div>
+          <div class="hover-card" id="hover" hidden></div>
+        </div>
+        <aside class="cards" id="cards" hidden></aside>
+      </div>
+      <div class="view" id="view-explorer" hidden>
+        <div class="explorer">
+          <div class="tree-col">
+            <label class="search"><span aria-hidden="true">⌕</span><input id="filter" placeholder="Filter topics" aria-label="Filter topics"></label>
+            <div id="tree"></div>
+          </div>
+          <div class="chart-col">
+            <div class="toolbar">
+              <span class="muted small" id="pick-note">Click topics to chart them</span>
+              <div class="toolbar-right"><span id="trend-zoom"></span>
+              <div class="seg" id="range">
+                <button data-min="15" aria-pressed="false">15 min</button>
+                <button data-min="60" aria-pressed="true">1 h</button>
+                <button data-min="180" aria-pressed="false">3 h</button>
+              </div></div>
+            </div>
+            <div id="trend"></div>
+            <div class="small muted" style="margin-top:6px">Drag across a chart to zoom into that range.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="chat">
+      <div class="chat-head">
+        <div><div class="title">Ask the broker</div><div class="small muted">Live values and up to 3 hours of history</div></div>
+        <button class="icon-btn" id="reset" title="New conversation" aria-label="New conversation">↺</button>
+      </div>
+      <div id="messages"></div>
+      <form class="composer" id="composer">
+        <textarea id="input" rows="2" placeholder="Ask about topics, trends, alarms…" aria-label="Message"></textarea>
+        <button class="send" id="send" type="submit" aria-label="Send">↑</button>
+      </form>
+    </aside>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ------------------------------------------------------------------ *
+ * Mock ISA-95 / UNS plant: acme/dublin/<area>/<line>/<cell>/<tag>.
+ * Runs on a virtual clock so we can backfill 3 hours of history at load.
+ * ------------------------------------------------------------------ */
+const ROOT = "acme/dublin";
+const RETENTION_MS = 180 * 60_000;
+const rand = (a, b) => a + Math.random() * (b - a);
+const noise = (n) => (Math.random() - 0.5) * 2 * n;
+const round = (v, dp = 2) => Math.round(v * 10 ** dp) / 10 ** dp;
+const wave = (ts, periodS, phase = 0) => Math.sin((2 * Math.PI * ts) / (periodS * 1000) + phase);
+const gauss = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
+/**
+ * Fill weight process for SPC: 500 g target, σ ≈ 1 g in control. Every 12-30 minutes a special cause appears:
+ * a step shift in the mean, a slow drift (nozzle wear, corrected by the operator) or a burst of extra variation.
+ */
+function fillProcess(now) {
+  let ev = { kind: "none", from: now() + rand(180, 600) * 1000, until: 0, size: 0 };
+  return () => {
+    const t = now();
+    if (t >= ev.until && ev.until) ev = { kind: "none", from: t + rand(720, 1800) * 1000, until: 0, size: 0 };
+    if (ev.kind === "none" && t >= ev.from) {
+      const kind = ["shift", "drift", "spread"][Math.floor(Math.random() * 3)];
+      const size = kind === "shift" ? (Math.random() < 0.6 ? 1 : -1) * rand(1.8, 3) : kind === "drift" ? (Math.random() < 0.5 ? 1 : -1) * rand(3, 4.5) : rand(2, 2.6);
+      ev = { kind, from: t, until: t + rand(kind === "spread" ? 240 : 360, kind === "spread" ? 600 : 900) * 1000, size };
+    }
+    const f = ev.kind === "none" || t < ev.from ? 0 : (t - ev.from) / (ev.until - ev.from);
+    const shift = ev.kind === "shift" ? ev.size : ev.kind === "drift" ? ev.size * f : 0;
+    return 500 + shift + (ev.kind === "spread" && f > 0 ? ev.size : 1) * gauss();
+  };
+}
+class Lag { constructor(v, k = 0.15) { this.v = v; this.k = k; } step(target, dt = 1) { this.v += (target - this.v) * (1 - Math.pow(1 - this.k, dt)); return this.v; } }
+
+const FAULTS = [
+  ["Filler motor overheating (line 2)", "packaging/line2/filler/motor_temp"],
+  ["Labeler web break, line 1 down", "packaging/line1/state"],
+  ["Compressor 2 trip, air pressure dropping", "utilities/compressed_air/compressor2"],
+  ["Oven zone 2 temperature overshoot", "processing/oven1/zone2"],
+  ["Mixer 1 high motor current", "processing/mixer1/motor_current"],
+  ["Capper torque drift (line 2), rejects rising", "packaging/line2/capper/torque"],
+  ["Filler motor overheating (line 3)", "packaging/line3/filler/motor_temp"],
+  ["Labeler web break, line 4 down", "packaging/line4/state"],
+  ["Network latency drift now, no warning (processing)", "processing/network/drift"],
+  ["Network latency drift now, no warning (packaging)", "packaging/network/drift"],
+  ["Packet loss storm (utilities network)", "utilities/network/loss"],
+  ["Network link down (packaging), filler data lost", "packaging/network/link"],
+];
+
+class Plant {
+  constructor(start) {
+    this.tags = [];
+    this.faults = [];
+    this.updaters = [];
+    this.lineStates = new Map();
+    this.now = start;
+    this.nextFaultAt = start + rand(600, 1200) * 1000;
+    this.site();
+    this.packaging("line1", 120, 0);
+    this.packaging("line2", 100, 1.3);
+    this.packaging("line3", 150, 2.4);
+    this.packaging("line4", 90, 3.7);
+    this.mixer("mixer1", 0);
+    this.mixer("mixer2", 2.1);
+    this.oven();
+    this.cip();
+    this.utilities();
+    ["packaging", "processing", "utilities"].forEach((area, i) => this.network(area, i));
+  }
+  add(topic, read, unit, every = 2, retain = false, drop) { this.tags.push({ topic: `${ROOT}/${topic}`, read, unit, every, retain, drop }); }
+  fault(key) { return this.faults.find((f) => f.until > this.now && key.startsWith(f.key)); }
+  inject(name, key, seconds = rand(150, 300)) {
+    this.faults.push({ name, key, from: this.now, until: this.now + seconds * 1000 });
+  }
+  /** Advance internal state by dt seconds to time `now`. */
+  advance(now, dt, autoFaults = true) {
+    this.now = now;
+    this.faults = this.faults.filter((f) => f.until > now);
+    if (autoFaults && now >= this.nextFaultAt) {
+      const [name, key] = FAULTS[Math.floor(Math.random() * FAULTS.length)];
+      this.inject(name, key);
+      this.nextFaultAt = now + rand(600, 1200) * 1000;
+    }
+    for (const u of this.updaters) u(now, dt);
+  }
+
+  site() {
+    this.add("shift", (n) => { const h = new Date(n).getHours(); return h >= 6 && h < 14 ? "A" : h >= 14 && h < 22 ? "B" : "C"; }, undefined, 30, true);
+    this.add("headcount", () => 42 + Math.round(noise(3)), "people", 60, true);
+    this.add("environment/ambient_temp", (n) => round(18 + 3 * wave(n, 3600) + noise(0.2)), "°C", 10);
+    this.add("environment/humidity", (n) => round(55 + 8 * wave(n, 5400, 1) + noise(0.5)), "%RH", 10);
+  }
+
+  packaging(line, rated, phase) {
+    const base = `packaging/${line}`;
+    // Start mid-shift (6 h in) so OEE doesn't open on a warm-up spike.
+    const s = { state: "Running", until: this.now + rand(300, 1500) * 1000, alarm: "none", good: rand(8000, 20000), reject: 0, total: 21600, running: 21600 * 0.86, runSpeed: 0 };
+    s.runSpeed = s.running * rated * 0.93;
+    s.reject = s.good * 0.012;
+    const speed = new Lag(rated * 0.95, 0.25);
+    const temps = { filler: new Lag(55, 0.05), capper: new Lag(48, 0.05), labeler: new Lag(45, 0.05), palletizer: new Lag(42, 0.05) };
+    const normal = { filler: 55, capper: 48, labeler: 45, palletizer: 42 };
+    this.updaters.push((now, dt) => {
+      const jam = this.fault(`${base}/state`);
+      if (jam && s.state !== "Down") { s.state = "Down"; s.alarm = "E-214 Labeler web break"; s.until = jam.until; }
+      else if (now > s.until) {
+        if (s.state === "Running") {
+          const r = Math.random();
+          s.state = r < 0.5 ? "Idle" : r < 0.8 ? "Down" : "Changeover";
+          s.alarm = s.state === "Down" ? ["E-101 Bottle infeed starved", "E-330 Capper chute blocked", "E-502 Guard door open"][Math.floor(Math.random() * 3)] : "none";
+          s.until = now + rand(60, s.state === "Changeover" ? 900 : 360) * 1000;
+        } else { s.state = "Running"; s.alarm = "none"; s.until = now + rand(900, 2400) * 1000; }
+      }
+      this.lineStates.set(line, s.state);
+      speed.step(s.state === "Running" ? rated * (0.92 + 0.05 * wave(now, 900, phase)) : 0, dt);
+      s.total += dt;
+      if (s.state === "Running") { s.running += dt; s.runSpeed += speed.v * dt; }
+      const made = (speed.v / 60) * dt;
+      const rr = this.fault(`${base}/capper/torque`) ? 0.06 : 0.012;
+      s.good += made * (1 - rr); s.reject += made * rr;
+      const rf = s.state === "Running" ? 1 : 0.2;
+      for (const c of Object.keys(temps)) temps[c].step(normal[c] * (0.75 + 0.25 * rf) + (this.fault(`${base}/${c}/motor_temp`) ? 38 : 0), dt);
+    });
+    const avail = () => (s.total ? s.running / s.total : 1);
+    const perf = () => (s.running ? Math.min(1, s.runSpeed / (s.running * rated)) : 0.95);
+    const qual = () => s.good / (s.good + s.reject);
+    const run = () => s.state === "Running";
+    this.add(`${base}/state`, () => s.state, undefined, 2, true);
+    this.add(`${base}/alarm/active`, () => s.alarm, undefined, 5, true);
+    this.add(`${base}/speed`, () => round(speed.v + (run() ? noise(0.8) : 0), 1), "bpm", 1);
+    this.add(`${base}/good_count`, () => Math.round(s.good), "units", 2);
+    this.add(`${base}/reject_count`, () => Math.round(s.reject), "units", 2);
+    this.add(`${base}/oee/availability`, () => round(avail() * 100, 1), "%", 10);
+    this.add(`${base}/oee/performance`, () => round(perf() * 100, 1), "%", 10);
+    this.add(`${base}/oee/quality`, () => round(qual() * 100, 1), "%", 10);
+    this.add(`${base}/oee/oee`, () => round(avail() * perf() * qual() * 100, 1), "%", 10);
+    const mt = (c) => (n) => round(temps[c].v + 2 * wave(n, 600, phase) + noise(0.3), 1);
+    const fill = fillProcess(() => this.now);
+    this.add(`${base}/filler/fill_weight`, () => round(run() ? fill() : 0, 1), "g", 1);
+    this.add(`${base}/filler/nozzle_pressure`, (n) => round(2.4 + 0.1 * wave(n, 120) + noise(0.03), 2), "bar", 2);
+    this.add(`${base}/filler/motor_temp`, mt("filler"), "°C", 2);
+    this.add(`${base}/filler/motor_current`, () => round(12 * (run() ? 1 : 0.2) + noise(0.4), 1), "A", 2);
+    // Filler counters with a per-message sequence number. Some messages are lost on purpose: about 1% at random,
+    // plus a network blip every 8-20 minutes that drops everything for 5-30 s. Counters and seq keep counting,
+    // so the losses show up as jumps in seq.
+    const fc = { seq: Math.floor(rand(10_000, 90_000)), filled: s.good + s.reject + rand(500, 2000), rejects: 0, last: 0, blipFrom: this.now + rand(120, 900) * 1000, blipUntil: 0 };
+    fc.rejects = fc.filled * 0.004;
+    const lost = () => {
+      if (this.now >= fc.blipFrom) { fc.blipUntil = this.now + rand(5, 30) * 1000; fc.blipFrom = fc.blipUntil + rand(480, 1200) * 1000; }
+      return this.now < fc.blipUntil || !!this.fault("packaging/network/link") || Math.random() < 0.01;
+    };
+    this.add(`${base}/filler/counts`, (n) => {
+      const dt = fc.last ? (n - fc.last) / 1000 : 0;
+      fc.last = n;
+      const made = (speed.v / 60) * dt;
+      fc.filled += made;
+      fc.rejects += made * (this.fault(`${base}/filler/motor_temp`) ? 0.02 : 0.004);
+      const total = Math.round(fc.filled), rejects = Math.round(fc.rejects);
+      return { seq: ++fc.seq, good_count: total - rejects, reject_count: rejects, total_count: total, state: run() ? "Filling" : "Stopped" };
+    }, undefined, 1, false, lost);
+    this.add(`${base}/capper/torque`, (n) => round((this.fault(`${base}/capper/torque`) ? 1.6 + 0.4 * wave(n, 60) : 2.2) + noise(0.05), 2), "Nm", 2);
+    this.add(`${base}/capper/motor_temp`, mt("capper"), "°C", 2);
+    this.add(`${base}/capper/cap_hopper_level`, (n) => round(60 + 35 * wave(n, 1500, phase) + noise(1), 0), "%", 5);
+    this.add(`${base}/labeler/web_tension`, () => round(run() ? 85 + noise(3) : 20 + noise(1), 1), "N", 2);
+    this.add(`${base}/labeler/motor_temp`, mt("labeler"), "°C", 2);
+    this.add(`${base}/labeler/label_roll_remaining`, (n) => round(100 - ((n / 20000) % 100), 0), "%", 10);
+    this.add(`${base}/palletizer/pallet_count`, () => Math.floor(s.good / 1200), "pallets", 5);
+    this.add(`${base}/palletizer/layer`, () => Math.floor((s.good % 1200) / 150) + 1, undefined, 5);
+    this.add(`${base}/palletizer/motor_temp`, mt("palletizer"), "°C", 2);
+
+    // Nested JSON: the MES work order running on the line.
+    const products = {
+      line1: [["CL-330", "Cola 330ml can"], ["CL-500", "Cola 500ml PET"]],
+      line2: [["LM-330", "Lemon 330ml can"], ["OR-1L", "Orange 1L PET"]],
+      line3: [["WT-500", "Still water 500ml PET"], ["SP-500", "Sparkling water 500ml PET"]],
+      line4: [["EN-250", "Energy 250ml can"], ["IT-330", "Iced tea 330ml glass"]],
+    }[line];
+    const operator = { line1: "A. Byrne", line2: "C. Murphy", line3: "D. O'Neill", line4: "R. Quinn" }[line];
+    const wo = { id: 24100 + Math.floor(rand(0, 50)), start: s.good - rand(2000, 9000), target: 24000, product: 0, last: s.state };
+    this.updaters.push(() => {
+      if (wo.last === "Changeover" && s.state !== "Changeover") {
+        wo.id++; wo.start = s.good; wo.target = [12000, 24000, 36000][Math.floor(Math.random() * 3)]; wo.product = (wo.product + 1) % products.length;
+      }
+      wo.last = s.state;
+    });
+    this.add(`${base}/mes/work_order`, (n) => {
+      const produced = Math.round(s.good - wo.start);
+      const h = new Date(n).getHours();
+      return {
+        order: { id: `WO-${wo.id}`, status: s.state === "Changeover" ? "Changeover" : produced >= wo.target ? "Complete" : "In Progress" },
+        product: { sku: products[wo.product][0], name: products[wo.product][1], batch_size: wo.target },
+        progress: { produced, remaining: Math.max(0, wo.target - produced), percent: round(Math.min(100, (produced / wo.target) * 100), 1) },
+        operator: { name: operator, shift: h >= 6 && h < 14 ? "A" : h >= 14 && h < 22 ? "B" : "C" },
+        line_state: s.state,
+      };
+    }, undefined, 5, true);
+
+    if (line === "line2") {
+      // Nested JSON: the palletizer robot's controller snapshot, three levels deep.
+      const ax = [new Lag(38, 0.05), new Lag(41, 0.05), new Lag(36, 0.05)];
+      this.updaters.push((now, dt) => { const rf = run() ? 1 : 0; ax[0].step(38 + 4 * rf, dt); ax[1].step(41 + 5 * rf, dt); ax[2].step(36 + 3 * rf, dt); });
+      this.add(`${base}/palletizer/robot`, (n) => {
+        const holding = run() && Math.floor(n / 1000) % 8 < 4;
+        const axis = (i, torque) => ({ temp: { value: round(ax[i].v + wave(n, 300 + 60 * i) + noise(0.2), 1), unit: "°C" }, torque_pct: round(torque * (run() ? 1 : 0.1) + noise(2), 1) });
+        return {
+          controller: { mode: run() ? "Auto" : "Manual", program: "P-LAYER-6", cycle_time_s: round(run() ? 8.4 + noise(0.3) : 0, 2) },
+          axes: { a1: axis(0, 45), a2: axis(1, 62), a3: axis(2, 30) },
+          gripper: { state: holding ? "Holding" : "Open", vacuum_kpa: round(holding ? -62 + noise(1.5) : -2 + noise(0.5), 1) },
+          safety: { fence_closed: !(s.state === "Down" && s.alarm.includes("Guard")), estop: false },
+        };
+      }, undefined, 2);
+    }
+  }
+
+  mixer(name, phase) {
+    const base = `processing/${name}`;
+    const phases = ["Charging", "Mixing", "Heating", "Holding", "Discharging", "CIP"];
+    const durs = [180, 420, 300, 240, 180, 240];
+    const cycle = durs.reduce((a, b) => a + b, 0);
+    const offset = rand(0, cycle) * 1000;
+    const temp = new Lag(25, 0.04), level = new Lag(20, 0.05);
+    const at = (n) => {
+      const k = Math.floor((n + offset) / 1000 / cycle);
+      let x = ((n + offset) / 1000) % cycle, i = 0;
+      while (x > durs[i]) x -= durs[i++];
+      return { phase: phases[i], batch: 2400 + (k % 600) };
+    };
+    const rpm = (p) => ({ Mixing: 180, Heating: 120, Holding: 60, Charging: 30, Discharging: 40, CIP: 90 })[p];
+    this.updaters.push((now, dt) => {
+      const p = at(now).phase;
+      level.step(p === "Charging" ? 85 : p === "Discharging" || p === "CIP" ? 5 : level.v, dt);
+      temp.step(p === "Heating" || p === "Holding" ? 72 : p === "CIP" ? 60 : 25, dt);
+    });
+    this.add(`${base}/state`, (n) => (at(n).phase === "CIP" ? "Cleaning" : "Running"), undefined, 5, true);
+    this.add(`${base}/batch/id`, (n) => `B-${at(n).batch}`, undefined, 10, true);
+    this.add(`${base}/batch/phase`, (n) => at(n).phase, undefined, 2, true);
+    this.add(`${base}/speed`, (n) => round(rpm(at(n).phase) + noise(2), 0), "rpm", 1);
+    this.add(`${base}/motor_current`, (n) => round(rpm(at(n).phase) * 0.09 + (this.fault(`${base}/motor_current`) ? 9 : 0) + noise(0.3), 1), "A", 2);
+    this.add(`${base}/motor_temp`, (n) => round(45 + rpm(at(n).phase) * 0.05 + 2 * wave(n, 700, phase) + noise(0.3), 1), "°C", 2);
+    this.add(`${base}/tank_level`, () => round(level.v + noise(0.3), 1), "%", 2);
+    this.add(`${base}/product_temp`, () => round(temp.v + noise(0.2), 1), "°C", 2);
+    // Nested JSON: the batch record from the batch engine, with setpoints next to actuals.
+    this.add(`${base}/batch/record`, (n) => {
+      const { phase: p, batch } = at(n);
+      return {
+        batch: { id: `B-${batch}`, recipe: name === "mixer1" ? "Syrup base v3" : "Citrus concentrate v7", phase: p, step: phases.indexOf(p) + 1, of_steps: phases.length },
+        setpoints: { temperature: { value: p === "Heating" || p === "Holding" ? 72 : p === "CIP" ? 60 : 25, unit: "°C" }, speed: { value: rpm(p), unit: "rpm" } },
+        actuals: { temperature: { value: round(temp.v, 1), unit: "°C" }, speed: { value: round(rpm(p) + noise(2), 0), unit: "rpm" }, level: { value: round(level.v, 1), unit: "%" } },
+        quality: { brix: round(p === "Holding" || p === "Discharging" ? 11.2 + noise(0.15) : 0, 2), ph: round(3.2 + noise(0.05), 2), sample_status: p === "Holding" ? "Pending lab" : p === "Discharging" ? "Released" : "Not sampled" },
+        operator: name === "mixer1" ? "M. Walsh" : "S. Kelly",
+      };
+    }, undefined, 5);
+  }
+
+  oven() {
+    const base = "processing/oven1";
+    const sps = [180, 210, 195];
+    const zones = sps.map((sp) => new Lag(sp, 0.06));
+    this.updaters.push((now, dt) => sps.forEach((sp, i) => zones[i].step(sp + (this.fault(`${base}/zone${i + 1}`) ? 28 : 0), dt)));
+    this.add(`${base}/state`, () => "Running", undefined, 10, true);
+    sps.forEach((sp, i) => {
+      this.add(`${base}/zone${i + 1}/temperature`, (n) => round(zones[i].v + 1.5 * wave(n, 240, i) + noise(0.4), 1), "°C", 1);
+      this.add(`${base}/zone${i + 1}/setpoint`, () => sp, "°C", 30, true);
+    });
+    this.add(`${base}/belt_speed`, (n) => round(1.8 + 0.05 * wave(n, 1800) + noise(0.01), 2), "m/min", 2);
+    this.add(`${base}/gas_flow`, (n) => round(42 + 4 * wave(n, 300) + (this.fault(`${base}/zone2`) ? 9 : 0) + noise(0.5), 1), "m³/h", 2);
+    this.add(`${base}/exhaust_temp`, (n) => round(140 + 5 * wave(n, 400) + noise(0.6), 1), "°C", 5);
+  }
+
+  cip() {
+    const base = "processing/cip";
+    const on = () => [...this.lineStates.values()].includes("Changeover");
+    this.add(`${base}/state`, () => (on() ? "Washing" : "Idle"), undefined, 5, true);
+    this.add(`${base}/supply_temp`, () => round(on() ? 78 + noise(0.8) : 30 + noise(0.3), 1), "°C", 2);
+    this.add(`${base}/conductivity`, () => round(on() ? 85 + noise(3) : 0.5 + noise(0.05), 2), "mS/cm", 2);
+    this.add(`${base}/flow`, () => round(on() ? 12 + noise(0.4) : 0, 1), "m³/h", 2);
+  }
+
+  utilities() {
+    const base = "utilities";
+    const pressure = new Lag(7.2, 0.1);
+    const load = () => [...this.lineStates.values()].filter((x) => x === "Running").length * 140 + 220;
+    let kwh = 1_250_000, water = 84_000;
+    this.updaters.push((now, dt) => {
+      pressure.step(7.2 - (this.fault(`${base}/compressed_air/compressor2`) ? 1.6 : 0), dt);
+      kwh += (load() * dt) / 3600;
+      water += (18 * dt) / 3600;
+    });
+    for (const c of ["compressor1", "compressor2"]) {
+      const trip = () => !!this.fault(`${base}/compressed_air/${c}`);
+      this.add(`${base}/compressed_air/${c}/state`, () => (trip() ? "Tripped" : "Running"), undefined, 5, true);
+      this.add(`${base}/compressed_air/${c}/power`, (n) => round(trip() ? 0 : 55 + 6 * wave(n, 200) + noise(1), 1), "kW", 2);
+      this.add(`${base}/compressed_air/${c}/motor_temp`, (n) => round(trip() ? 35 : 68 + 2 * wave(n, 500) + noise(0.4), 1), "°C", 5);
+    }
+    this.add(`${base}/compressed_air/header_pressure`, (n) => round(pressure.v + 0.1 * wave(n, 90) + noise(0.03), 2), "bar", 1);
+    this.add(`${base}/compressed_air/dew_point`, () => round(3 + noise(0.2), 1), "°C", 10);
+    this.add(`${base}/boiler/state`, () => "Running", undefined, 10, true);
+    this.add(`${base}/boiler/steam_pressure`, (n) => round(10 + 0.3 * wave(n, 180) + noise(0.05), 2), "bar", 2);
+    this.add(`${base}/boiler/water_level`, (n) => round(50 + 6 * wave(n, 240) + noise(0.5), 1), "%", 2);
+    this.add(`${base}/boiler/flue_temp`, (n) => round(190 + 6 * wave(n, 600) + noise(0.8), 1), "°C", 5);
+    // Nested JSON: boiler diagnostics. Health drops to Warning while compressor 2 is tripped (low instrument air).
+    this.add(`${base}/boiler/diagnostics`, (n) => {
+      const warn = !!this.fault(`${base}/compressed_air/compressor2`);
+      return {
+        health: { status: warn ? "Warning" : "OK", score: round(warn ? 71 + noise(2) : 94 + noise(1), 1), message: warn ? "Low instrument air pressure at burner actuator" : "" },
+        burner: { flame: "On", firing_rate_pct: round(62 + 8 * wave(n, 180) + noise(1), 1), fuel: { flow: { value: round(41 + 3 * wave(n, 180) + noise(0.4), 1), unit: "m³/h" }, type: "Natural gas" } },
+        drum: { pressure: { value: round(10 + 0.3 * wave(n, 180) + noise(0.05), 2), unit: "bar" }, level: { value: round(50 + 6 * wave(n, 240) + noise(0.5), 1), unit: "%" } },
+        maintenance: { last_service: "2026-08-14", next_service: "2026-11-14", run_hours: Math.round(4120 + (n - startedAt) / 3_600_000 + 3) },
+      };
+    }, undefined, 5);
+    this.add(`${base}/power/main/active_power`, () => round(load() + noise(8), 1), "kW", 2);
+    this.add(`${base}/power/main/energy`, () => round(kwh, 1), "kWh", 10);
+    this.add(`${base}/power/main/voltage_l1`, () => round(230 + noise(1.5), 1), "V", 5);
+    this.add(`${base}/power/main/power_factor`, () => round(0.94 + noise(0.01), 3), undefined, 10);
+    this.add(`${base}/chiller/supply_temp`, (n) => round(6 + 0.4 * wave(n, 900) + noise(0.1), 1), "°C", 5);
+    this.add(`${base}/chiller/return_temp`, (n) => round(11 + 0.6 * wave(n, 900) + noise(0.15), 1), "°C", 5);
+    this.add(`${base}/chiller/power`, (n) => round(85 + 10 * wave(n, 900) + noise(2), 1), "kW", 5);
+    this.add(`${base}/water/flow`, (n) => round(18 + 4 * wave(n, 1200) + noise(0.5), 1), "m³/h", 2);
+    this.add(`${base}/water/total`, () => round(water, 1), "m³", 10);
+    this.add(`${base}/water/hardness`, () => round(120 + noise(2), 0), "ppm", 30);
+  }
+
+  /**
+   * Per-area network health. Latency normally sits around 2500 ms (0-5000), but about every 10 minutes it drifts
+   * out to ~9000 ms for a few minutes. Most drifts (85%) are preceded by early-warning signs: jitter, packet loss
+   * and retransmits creep up and throughput sags 1-3 minutes before latency moves.
+   */
+  network(area, index) {
+    const base = `${area}/network`;
+    const drift = { onset: this.now + rand(90, 420) * 1000 + index * 120_000, warn: rand(60, 180), ramp: rand(60, 90), hold: rand(60, 150), recover: rand(45, 75), warns: true };
+    const st = { p: 0, d: 0, storm: 0, down: false };
+    const ease = (x) => x * x * (3 - 2 * x);
+    this.updaters.push((now) => {
+      // Injected fault: start a drift right now, without the usual early-warning signs.
+      if (this.fault(`${base}/drift`) && now < drift.onset - 5000) Object.assign(drift, { onset: now, warns: false });
+      st.storm = this.fault(`${base}/loss`) ? 1 : 0;
+      st.down = !!this.fault(`${base}/link`);
+      let rel = (now - drift.onset) / 1000;
+      if (rel > drift.ramp + drift.hold + drift.recover) {
+        // Schedule the next drift roughly 10 minutes after this one started.
+        Object.assign(drift, { onset: drift.onset + rand(540, 660) * 1000, warn: rand(60, 180), ramp: rand(60, 90), hold: rand(60, 150), recover: rand(45, 75), warns: Math.random() < 0.85 });
+        rel = (now - drift.onset) / 1000;
+      }
+      st.p = drift.warns && rel >= -drift.warn && rel < 0 ? ease((rel + drift.warn) / drift.warn) : 0;
+      st.d = rel < 0 ? 0 : rel < drift.ramp ? ease(rel / drift.ramp) : rel < drift.ramp + drift.hold ? 1 : rel < drift.ramp + drift.hold + drift.recover ? 1 - ease((rel - drift.ramp - drift.hold) / drift.recover) : 0;
+      if (st.d > 0) st.p = Math.max(st.p, 1 - st.d * 0.3);
+    });
+    const baseLatency = (t) => Math.min(5000, Math.max(50, 2500 + 700 * wave(t, 240, index) + noise(300)));
+    // While the link is down nothing gets through, so the measurement tags go quiet.
+    const down = () => st.down;
+    this.add(`${base}/latency_ms`, (t) => Math.round(baseLatency(t) * (1 - st.d) + st.d * (9000 + noise(400)) + st.storm * 600), "ms", 1, false, down);
+    this.add(`${base}/jitter_ms`, () => Math.round(Math.max(10, 120 + noise(40) + st.p * 600 + st.d * 900 + st.storm * 350)), "ms", 1, false, down);
+    this.add(`${base}/packet_loss_pct`, () => round(Math.max(0, 0.2 + noise(0.1) + st.p * 2.5 + st.d * 4 + st.storm * 9), 2), "%", 2, false, down);
+    this.add(`${base}/throughput_mbps`, () => round(Math.max(1, 85 + noise(4) - st.p * 25 - st.d * 45 - st.storm * 35), 1), "Mbps", 2, false, down);
+    this.add(`${base}/retransmits_per_min`, () => Math.round(Math.max(0, 4 + noise(2) + st.p * 40 + st.d * 80 + st.storm * 120)), undefined, 5, false, down);
+    this.add(`${base}/link_state`, () => (st.down ? "Down" : st.d > 0.5 || st.storm ? "Degraded" : "Up"), undefined, 5, true);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * In-memory "broker" history: every published message, 3 h rolling.
+ * ------------------------------------------------------------------ */
+const store = new Map(); // topic -> {topic, unit, ts: number[], v: (number|string)[], numeric, source?}
+const docs = new Map(); // JSON document topic -> latest document; its fields live in `store` as <topic>/<path>
+const throughput = []; // {ts, count} per second
+let totalMsgs = 0;
+
+function record(topic, unit, ts, value, source) {
+  let t = store.get(topic);
+  if (!t) { t = { topic, unit, ts: [], v: [], numeric: typeof value === "number", source }; store.set(topic, t); }
+  t.ts.push(ts); t.v.push(value);
+  if (!source) totalMsgs++;
+}
+/** Leaves of a nested JSON document as [path, value, unit]; an inner {value, unit} object counts as one leaf. */
+function flatten(o, path = [], out = []) {
+  for (const [k, v] of Object.entries(o)) {
+    const p = [...path, k];
+    if (v == null) continue;
+    if (typeof v === "object" && "value" in v) out.push([p.join("/"), v.value, v.unit]);
+    else if (typeof v === "object") flatten(v, p, out);
+    else out.push([p.join("/"), typeof v === "boolean" ? String(v) : v, undefined]);
+  }
+  return out;
+}
+/** Publishes one tag: a plain value, or a JSON document that is split into field topics. Returns the topics written. */
+function emit(tag, now) {
+  const v = tag.read(now);
+  if (tag.drop?.()) return []; // simulated lost message
+  if (!v || typeof v !== "object") { record(tag.topic, tag.unit, now, v); return [tag.topic]; }
+  docs.set(tag.topic, { ...v, timestamp: new Date(now).toISOString() });
+  totalMsgs++;
+  return flatten(v).map(([path, value, unit]) => (record(`${tag.topic}/${path}`, unit, now, value, tag.topic), `${tag.topic}/${path}`));
+}
+const SEQ_NAME = /^(seq|sequence|seq_no|seqNo|sequence_number)$/;
+/** The seq topic covering a topic: itself, or the seq field of the JSON document it is (or belongs to). */
+function seqSource(topic) {
+  if (SEQ_NAME.test(topic.split("/").pop())) return store.has(topic) ? topic : null;
+  const doc = docs.has(topic) ? topic : store.get(topic)?.source;
+  if (!doc) return null;
+  return ["seq", "sequence", "seq_no", "seqNo", "sequence_number"].map((n) => `${doc}/${n}`).find((t) => store.has(t)) || null;
+}
+/** Missed messages from jumps in a sequence number (a jump of n = n - 1 lost; a drop back = restart). */
+function seqGaps(seqTopic, from, to) {
+  const s = slice(store.get(seqTopic), from, to), gaps = [];
+  let restarts = 0;
+  const dts = s.ts.slice(1).map((t, i) => t - s.ts[i]).sort((a, b) => a - b), typical = Math.max(1, dts[Math.floor(dts.length / 2)] ?? 1000);
+  for (let i = 1; i < s.v.length; i++) {
+    const d = s.v[i] - s.v[i - 1];
+    if (d - 1 > Math.round((s.ts[i] - s.ts[i - 1]) / typical) * 3 + 10) restarts++; // jump too big for the time gap: restart
+    else if (d > 1) gaps.push({ at: s.ts[i], lastSeenAt: s.ts[i - 1], afterSeq: s.v[i - 1], nextSeq: s.v[i], missed: d - 1 });
+    else if (d < 0) restarts++;
+  }
+  const missed = gaps.reduce((a, g) => a + g.missed, 0), received = s.v.length;
+  return { topic: seqTopic, received, missed, lossPct: received + missed ? (missed / (received + missed)) * 100 : 0, restarts, gaps };
+}
+function gapSummaryHtml(g, label = "") {
+  if (!g || !g.received) return "";
+  if (!g.missed) return `<div class="gap-summary small">✓ No missed messages${label}</div>`;
+  const big = g.gaps.reduce((a, x) => (!a || x.missed > a.missed ? x : a), null);
+  const title = g.gaps.slice(-8).map((x) => `${new Date(x.at).toLocaleTimeString()}: seq ${x.afterSeq} → ${x.nextSeq} (${x.missed} missed)`).join("&#10;");
+  return `<div class="gap-summary bad small" title="${title}">⚠ ${g.missed} missed of ${g.missed + g.received} (${g.lossPct.toFixed(1)}%) · ${g.gaps.length} gap${g.gaps.length === 1 ? "" : "s"}${big && big.missed > 1 ? ` · longest ${Math.round((big.at - big.lastSeenAt) / 1000)} s` : ""}${label}</div>`;
+}
+const docOf = (id) => [...docs.keys()].find((d) => id === d || id.startsWith(d + "/"));
+const lastOf = (t) => ({ value: t.v[t.v.length - 1], ts: t.ts[t.ts.length - 1] });
+function lowerBound(arr, x) { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < x) lo = m + 1; else hi = m; } return lo; }
+function slice(t, from, to) { const a = lowerBound(t.ts, from), b = lowerBound(t.ts, to + 1); return { ts: t.ts.slice(a, b), v: t.v.slice(a, b) }; }
+function ratePerMin(t, now = Date.now()) { return t.ts.length - lowerBound(t.ts, now - 60_000); }
+function prune(now) {
+  const cut = now - RETENTION_MS;
+  for (const t of store.values()) { const i = lowerBound(t.ts, cut); if (i > 0) { t.ts.splice(0, i); t.v.splice(0, i); } }
+  while (throughput.length && throughput[0].ts < cut) throughput.shift();
+}
+function mqttMatch(filter, topic) {
+  if (filter === "#" || filter === topic) return true;
+  const f = filter.split("/"), t = topic.split("/");
+  for (let i = 0; i < f.length; i++) { if (f[i] === "#") return true; if (i >= t.length) return false; if (f[i] !== "+" && f[i] !== t[i]) return false; }
+  return f.length === t.length;
+}
+const matchTopics = (filter) => [...store.values()].filter((t) => mqttMatch(filter, t.topic)).sort((a, b) => a.topic.localeCompare(b.topic));
+function bucketed(t, from, to, maxPoints = 120) {
+  const s = slice(t, from, to);
+  const size = Math.max(1000, Math.ceil((to - from) / maxPoints));
+  const out = [];
+  let cur = null;
+  for (let i = 0; i < s.ts.length; i++) {
+    const v = s.v[i]; if (typeof v !== "number") continue;
+    const b = Math.floor(s.ts[i] / size) * size;
+    if (!cur || cur.ts !== b) { cur = { ts: b, sum: 0, n: 0, min: Infinity, max: -Infinity }; out.push(cur); }
+    cur.sum += v; cur.n++; cur.min = Math.min(cur.min, v); cur.max = Math.max(cur.max, v);
+  }
+  return out.map((c) => ({ ts: c.ts, avg: c.sum / c.n, min: c.min, max: c.max, n: c.n }));
+}
+const isAlarm = (t) => {
+  const { value } = lastOf(t);
+  if (typeof value !== "string") return false;
+  if (t.topic.endsWith("/alarm/active")) return value !== "none";
+  return /^(down|tripped|fault|stopped|warning)$/i.test(value);
+};
+const fmt = (t, value = lastOf(t).value) => typeof value === "number" ? `${Number.isInteger(value) ? value : value.toFixed(2)}${t.unit ? " " + t.unit : ""}` : String(value);
+
+
+/* ------------------------------------------------------------------ *
+ * Baseline network-drift predictor (same method as server/src/predictor.ts). Every 5 s, per area, it combines
+ * early-warning z-scores (jitter, loss, retransmits, throughput vs their 30-min median/MAD), the latency trend
+ * projected 2 minutes ahead, and the learned drift rhythm into one risk, publishes <area>/network/prediction,
+ * and scores itself against what actually happened.
+ * ------------------------------------------------------------------ */
+const DRIFT_MS = 5000, WARN_RISK = 0.6;
+const predState = new Map();
+const meanOf = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : NaN);
+const medianOf = (xs) => { if (!xs.length) return NaN; const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+const logistic = (x) => 1 / (1 + Math.exp(-x));
+const rn = (v, dp = 0) => (Number.isFinite(v) ? Math.round(v * 10 ** dp) / 10 ** dp : null);
+function robustZ(topic, now, sign = 1) {
+  const t = store.get(topic); if (!t) return 0;
+  const hist = slice(t, now - 30 * 60_000, now).v, recent = slice(t, now - 30_000, now).v;
+  if (hist.length < 20 || !recent.length) return 0;
+  const med = medianOf(hist), mad = medianOf(hist.map((x) => Math.abs(x - med))) * 1.4826 || 1e-6;
+  return (sign * (meanOf(recent) - med)) / mad;
+}
+function predictTick(now) {
+  for (const t of store.values()) {
+    if (!t.topic.endsWith("/network/latency_ms")) continue;
+    const base = t.topic.slice(0, -"/latency_ms".length);
+    let st = predState.get(base);
+    if (!st) predState.set(base, (st = { drifting: false, warnedAt: null, onsets: [], leads: [], missed: 0, falseAlarms: 0 }));
+    const lat = slice(t, now - 60 * 60_000, now);
+    if (lat.v.length < 10) continue;
+    const recent = slice(t, now - 30_000, now).v;
+    if (!recent.length) { emit({ topic: `${base}/prediction`, read: () => ({ status: "No data", reason: "no latency readings in the last 30 s (link down?)", model: "baseline-v1" }) }, now); continue; }
+    const lat30 = meanOf(recent);
+
+    // Past onsets in the last hour: the 15 s rolling mean crossing DRIFT_MS upward, at least 3 minutes apart.
+    const onsets = [];
+    let above = false, a = 0, sum = 0;
+    for (let i = 0; i < lat.v.length; i++) {
+      sum += lat.v[i];
+      while (lat.ts[a] < lat.ts[i] - 15_000) sum -= lat.v[a++];
+      const m = sum / (i - a + 1);
+      if (!above && m > DRIFT_MS && (!onsets.length || lat.ts[i] - onsets[onsets.length - 1] > 180_000)) onsets.push(lat.ts[i]);
+      above = m > DRIFT_MS;
+    }
+    const periods = onsets.slice(1).map((o, i) => o - onsets[i]).filter((p) => p > 180_000);
+    const period = periods.length ? medianOf(periods) : null;
+    let dueIn = null;
+    if (period) { let next = onsets[onsets.length - 1] + period; while (next < now - 60_000) next += period; dueIn = (next - now) / 1000; }
+
+    const z = { jitter: robustZ(`${base}/jitter_ms`, now), packet_loss: robustZ(`${base}/packet_loss_pct`, now), retransmits: robustZ(`${base}/retransmits_per_min`, now), throughput_drop: robustZ(`${base}/throughput_mbps`, now, -1) };
+    const zs = Object.values(z).filter((x) => x > 0).sort((x, y) => y - x);
+    const pre = zs.length ? meanOf(zs.slice(0, 3)) : 0;
+    const pPre = logistic((pre - 3) * 1.2);
+
+    let slope = 0;
+    const i90 = lowerBound(lat.ts, now - 90_000), tts = lat.ts.slice(i90), tvs = lat.v.slice(i90);
+    if (tts.length > 5 && tts[tts.length - 1] - tts[0] > 60_000) {
+      const mx = meanOf(tts), my = meanOf(tvs);
+      let num = 0, den = 0;
+      tts.forEach((x, i) => { num += (x - mx) * (tvs[i] - my); den += (x - mx) ** 2; });
+      slope = (num / (den || 1)) * 1000;
+    }
+    const pTrend = logistic((lat30 + slope * 120 - DRIFT_MS) / 600);
+    const pRhythm = dueIn == null || dueIn < -60 ? 0.05 : 0.75 * Math.exp(-Math.max(0, dueIn - 30) / 90);
+
+    const drifting = lat30 > DRIFT_MS;
+    const risk = drifting ? 1 : 1 - (1 - pPre) * (1 - pTrend) * (1 - pRhythm);
+    const baseline = medianOf(lat.v.filter((v) => v < DRIFT_MS));
+    const forecast = drifting ? Math.max(lat30, 8500) : baseline * (1 - risk) + 9000 * risk;
+
+    if (!st.drifting && drifting) {
+      st.onsets.push(now);
+      if (st.warnedAt && now - st.warnedAt < 10 * 60_000) st.leads.push((now - st.warnedAt) / 1000); else st.missed++;
+      st.warnedAt = null;
+    } else if (!drifting && risk >= WARN_RISK && !st.warnedAt) st.warnedAt = now;
+    else if (!drifting && st.warnedAt && now - st.warnedAt > 6 * 60_000) { st.falseAlarms++; st.warnedAt = null; }
+    st.drifting = drifting;
+
+    const reasons = [];
+    if (drifting) reasons.push(`latency ${Math.round(lat30)} ms is above ${DRIFT_MS} ms`);
+    for (const [k, v] of Object.entries(z)) if (v > 2.5) reasons.push(`${k.replace("_", " ")} ${v.toFixed(1)}σ above normal`);
+    if (!drifting && pTrend > 0.4) reasons.push(`latency rising ${Math.round(slope)} ms/s`);
+    if (dueIn != null && dueIn < 180 && dueIn > -60) reasons.push(`drifts recur every ~${Math.round(period / 60_000)} min, next due ${dueIn > 0 ? `in ${Math.round(dueIn)} s` : "now"}`);
+    const doc = {
+      status: drifting ? "Drifting" : risk >= WARN_RISK ? "Drift likely" : risk >= 0.3 ? "Watch" : "Normal",
+      drift_risk_pct: rn(risk * 100, 1), latency_now_ms: rn(lat30), forecast_2m_ms: rn(forecast),
+      next_drift_due_s: dueIn != null ? rn(Math.max(0, dueIn)) : -1, typical_period_min: period ? rn(period / 60_000, 1) : -1,
+      signals: { early_warning_z: rn(pre, 2), latency_slope_ms_per_s: rn(slope, 1), rhythm_pct: rn(pRhythm * 100, 1) },
+      reason: reasons.join("; ") || "all signals normal",
+      score: { drifts_seen: st.onsets.length, predicted: st.leads.length, missed: st.missed, false_alarms: st.falseAlarms, median_lead_s: st.leads.length ? rn(medianOf(st.leads)) : -1, last_lead_s: st.leads.length ? rn(st.leads[st.leads.length - 1]) : -1 },
+      model: "baseline-v1",
+    };
+    emit({ topic: `${base}/prediction`, read: () => doc }, now);
+  }
+}
+
+
+/* ------------------------------------------------------------------ *
+ * SPC (same method as server/src/spc.ts): X̄-R, X̄-S and I-MR charts, Western Electric rules, capability.
+ * ------------------------------------------------------------------ */
+const SPC_SPECS = { fill_weight: { lsl: 495, target: 500, usl: 505, validAbove: 100 } };
+const specFor = (topic) => SPC_SPECS[topic.split("/").pop()] ?? {};
+const SPC_K = { 2: [1.88, 0, 3.267, 1.128, 2.659, 0, 3.267, 0.7979], 3: [1.023, 0, 2.574, 1.693, 1.954, 0, 2.568, 0.8862], 4: [0.729, 0, 2.282, 2.059, 1.628, 0, 2.266, 0.9213], 5: [0.577, 0, 2.114, 2.326, 1.427, 0, 2.089, 0.94], 6: [0.483, 0, 2.004, 2.534, 1.287, 0.03, 1.97, 0.9515], 7: [0.419, 0.076, 1.924, 2.704, 1.182, 0.118, 1.882, 0.9594], 8: [0.373, 0.136, 1.864, 2.847, 1.099, 0.185, 1.815, 0.965], 9: [0.337, 0.184, 1.816, 2.97, 1.032, 0.239, 1.761, 0.9693], 10: [0.308, 0.223, 1.777, 3.078, 0.975, 0.284, 1.716, 0.9727] }; // A2 D3 D4 d2 A3 B3 B4 c4
+const SPC_RULES = { 1: "1 point beyond 3σ", 2: "2 of 3 points beyond 2σ, same side", 3: "4 of 5 points beyond 1σ, same side", 4: "8 points in a row on one side of the centre line", 5: "6 points in a row steadily rising or falling", 6: "Range/spread above its upper control limit" };
+const RULE_SHORT = { 1: "beyond 3σ", 2: "2 of 3 beyond 2σ", 3: "4 of 5 beyond 1σ", 4: "8 on one side", 5: "6 trending", 6: "spread above UCL" };
+const sdOf = (xs) => { const m = meanOf(xs); return Math.sqrt(xs.reduce((a, x) => a + (x - m) ** 2, 0) / Math.max(1, xs.length - 1)); };
+function weRules(xs, cl, s) {
+  const z = xs.map((x) => (x - cl) / (s || 1e-9));
+  return z.map((zi, i) => {
+    const out = new Set();
+    if (Math.abs(zi) > 3) out.add(1);
+    for (const side of [1, -1]) {
+      const beyond = (k, lim) => z.slice(Math.max(0, i - k + 1), i + 1).filter((v) => side * v > lim).length;
+      if (i >= 2 && side * zi > 2 && beyond(3, 2) >= 2) out.add(2);
+      if (i >= 4 && side * zi > 1 && beyond(5, 1) >= 4) out.add(3);
+      if (i >= 7 && beyond(8, 0) === 8) out.add(4);
+    }
+    if (i >= 5) { const d = xs.slice(i - 5, i + 1).map((v, j, a) => (j ? Math.sign(v - a[j - 1]) : 0)).slice(1); if (d.every((v) => v > 0) || d.every((v) => v < 0)) out.add(5); }
+    return [...out];
+  });
+}
+function spcCalc(topic, from, to, opts = {}) {
+  const t = store.get(topic); if (!t?.numeric) return null;
+  const chart = opts.chart || "xbar-r", n = Math.min(10, Math.max(2, Math.round(opts.n || 5)));
+  const every = Math.max(1, opts.every || (chart === "imr" ? 10 : 60)) * 1000;
+  const sp = specFor(topic), spec = { lsl: opts.lsl ?? sp.lsl, usl: opts.usl ?? sp.usl, target: opts.target ?? sp.target, validAbove: sp.validAbove };
+  const sl = slice(t, from, to), groups = [], all = [];
+  sl.v.forEach((v, i) => {
+    if (typeof v !== "number" || (spec.validAbove != null && v <= spec.validAbove)) return;
+    all.push(v);
+    const slot = Math.floor(sl.ts[i] / every) * every, g = groups[groups.length - 1];
+    if (g && g.ts === slot) { if (chart !== "imr" && g.xs.length < n) g.xs.push(v); } else groups.push({ ts: slot, xs: [v] });
+  });
+  const used = chart === "imr" ? groups : groups.filter((g) => g.xs.length === n);
+  if (all.length < 10 || used.length < (chart === "imr" ? 10 : 5)) return null;
+  let points, x, r, sigmaWithin;
+  if (chart === "imr") {
+    const xs = used.map((g) => g.xs[0]), mrs = xs.slice(1).map((v, i) => Math.abs(v - xs[i])), mrBar = meanOf(mrs), xBar = meanOf(xs);
+    sigmaWithin = mrBar / 1.128;
+    x = { cl: xBar, ucl: xBar + 3 * sigmaWithin, lcl: xBar - 3 * sigmaWithin, sigma: sigmaWithin };
+    r = { cl: mrBar, ucl: 3.267 * mrBar, lcl: 0, label: "MR" };
+    points = used.map((g, i) => ({ ts: g.ts, x: xs[i], r: i ? mrs[i - 1] : null }));
+  } else {
+    const [A2, D3, D4, d2, A3, B3, B4, c4] = SPC_K[n], S = chart === "xbar-s";
+    const means = used.map((g) => meanOf(g.xs)), spread = used.map((g) => (S ? sdOf(g.xs) : Math.max(...g.xs) - Math.min(...g.xs)));
+    const xBar = meanOf(means), sBar = meanOf(spread), half = (S ? A3 : A2) * sBar;
+    sigmaWithin = S ? sBar / c4 : sBar / d2;
+    x = { cl: xBar, ucl: xBar + half, lcl: xBar - half, sigma: half / 3 };
+    r = S ? { cl: sBar, ucl: B4 * sBar, lcl: B3 * sBar, label: "S" } : { cl: sBar, ucl: D4 * sBar, lcl: D3 * sBar, label: "R" };
+    points = used.map((g, i) => ({ ts: g.ts, x: means[i], r: spread[i] }));
+  }
+  const fired = weRules(points.map((p) => p.x), x.cl, x.sigma);
+  points.forEach((p, i) => { p.rules = fired[i]; if (p.r != null && p.r > r.ucl) p.rules.push(6); });
+  const violations = points.flatMap((p) => p.rules.map((rule) => ({ ts: p.ts, rule, text: SPC_RULES[rule] })));
+  const m = meanOf(all), sAll = sdOf(all), { lsl, usl } = spec;
+  const cap = (s) => ({ p: lsl != null && usl != null ? (usl - lsl) / (6 * s) : null, pk: lsl != null || usl != null ? Math.min(usl != null ? (usl - m) / (3 * s) : Infinity, lsl != null ? (m - lsl) / (3 * s) : Infinity) : null });
+  const w = cap(sigmaWithin), o = cap(sAll);
+  const out = lsl != null || usl != null ? all.filter((v) => (lsl != null && v < lsl) || (usl != null && v > usl)).length : null;
+  return { chart, n: chart === "imr" ? 1 : n, every: every / 1000, points, x, r, spec, violations,
+    capability: { mean: m, sigmaWithin, sigmaOverall: sAll, cp: w.p, cpk: w.pk, pp: o.p, ppk: o.pk, outOfSpecPct: out == null ? null : (out / all.length) * 100, readings: all.length } };
+}
+
+/* ------------------------------------------------------------------ *
+ * Simulation loop: backfill 3 h, then publish live every second.
+ * ------------------------------------------------------------------ */
+const startedAt = Date.now();
+const plant = new Plant(startedAt - RETENTION_MS);
+function publishAt(now, stepS, force) {
+  const sec = Math.floor(now / 1000);
+  let n = 0;
+  for (const tag of plant.tags) {
+    if (!force && Math.floor(sec / tag.every) === Math.floor((sec - stepS) / tag.every)) continue;
+    emit(tag, now);
+    n++;
+  }
+  return n;
+}
+(function backfill() {
+  const step = 5;
+  let first = true;
+  for (let now = startedAt - RETENTION_MS + 1000; now < startedAt; now += step * 1000) {
+    plant.advance(now, step);
+    const n = publishAt(now, step, first);
+    first = false;
+    throughput.push({ ts: now, count: n / step });
+    predictTick(now);
+  }
+})();
+let mpsHistory = throughput.slice(-90).map((t) => Math.round(t.count));
+const pulses = new Map();
+function liveTick() {
+  const now = Date.now();
+  plant.advance(now, 1);
+  const sec = Math.floor(now / 1000);
+  let n = 0;
+  for (const tag of plant.tags) {
+    if (sec % tag.every !== 0) continue;
+    for (const t of emit(tag, now)) pulses.set(t, now);
+    n++;
+  }
+  if (sec % 5 === 0) predictTick(now);
+  throughput.push({ ts: now, count: n });
+  mpsHistory.push(n);
+  if (mpsHistory.length > 90) mpsHistory.shift();
+  if (sec % 60 === 0) prune(now);
+}
+
+/* ------------------------------------------------------------------ *
+ * Tools Claude can call (executed here in the page).
+ * ------------------------------------------------------------------ */
+const iso = (ts) => (ts ? new Date(ts).toISOString() : null);
+const r3 = (v, dp = 3) => (v == null || !isFinite(v) ? null : Math.round(v * 10 ** dp) / 10 ** dp);
+function win(input) {
+  const to = input.end ? Date.parse(String(input.end)) : Date.now();
+  const from = input.start ? Date.parse(String(input.start)) : to - Number(input.minutes || 60) * 60_000;
+  if (isNaN(from) || isNaN(to)) throw new Error("Could not parse start/end; use ISO 8601.");
+  return { from: Math.max(from, Date.now() - RETENTION_MS), to };
+}
+const winProps = {
+  minutes: { type: "number", description: "Look back this many minutes from now (default 60, max 180)." },
+  start: { type: "string", description: "ISO 8601 start (optional)." },
+  end: { type: "string", description: "ISO 8601 end (optional, default now)." },
+};
+const summary = (t) => ({ topic: t.topic, value: lastOf(t).value, unit: t.unit, ageS: Math.round((Date.now() - lastOf(t).ts) / 1000), msgsPerMin: ratePerMin(t) });
+function statsOf(t, from, to) {
+  const s = slice(t, from, to);
+  const nums = s.v.filter((x) => typeof x === "number");
+  if (!nums.length) return { topic: t.topic, samples: s.v.length, numeric: false, latest: lastOf(t).value };
+  let min = Infinity, max = -Infinity, sum = 0, sum2 = 0;
+  for (const x of nums) { min = Math.min(min, x); max = Math.max(max, x); sum += x; sum2 += x * x; }
+  const avg = sum / nums.length;
+  return { topic: t.topic, unit: t.unit, samples: nums.length, min: r3(min), max: r3(max), avg: r3(avg), stddev: r3(Math.sqrt(Math.max(0, sum2 / nums.length - avg * avg))), first: r3(nums[0]), last: r3(nums[nums.length - 1]), change: r3(nums[nums.length - 1] - nums[0]) };
+}
+
+let chartSink = null; // set per chat turn so show_chart renders into that reply
+const TOOL_LABEL = (name, i) => `${name}${i.topic || i.filter ? " · " + (i.topic || i.filter) : Array.isArray(i.topics) ? " · " + i.topics.length + " topics" : ""}`;
+function makeTools(onCall) {
+  const tool = (name, description, inputSchema, run) => ({
+    name, description, inputSchema,
+    execute: (input) => {
+      const done = onCall(name, input || {});
+      try { const res = run(input || {}); done(true); return res; }
+      catch (e) { done(false); throw e; }
+    },
+  });
+  return [
+    tool("broker_overview", "Overview of the broker: topic count, throughput, history window, busiest topics, alarms and the top branches of the topic tree. Returns JSON.", { type: "object", properties: {} }, () => {
+      const all = [...store.values()];
+      const branches = {};
+      for (const t of all) { const k = t.topic.split("/").slice(0, 4).join("/"); branches[k] = (branches[k] || 0) + 1; }
+      return {
+        broker: "sim://acme-dublin (in-browser simulator)", now: iso(Date.now()), topicCount: all.filter((t) => !t.source).length + docs.size,
+        jsonDocuments: [...docs.keys()], jsonFieldTopics: all.filter((t) => t.source).length,
+        messagesPerSecond: r3(mpsHistory.slice(-10).reduce((a, b) => a + b, 0) / Math.max(1, Math.min(10, mpsHistory.length)), 1),
+        historyFrom: iso(Math.min(...all.map((t) => t.ts[0]))), alarms: all.filter(isAlarm).map(summary),
+        busiest: all.sort((a, b) => ratePerMin(b) - ratePerMin(a)).slice(0, 8).map(summary), branches,
+      };
+    }),
+    tool("list_topics", "List topics matching an MQTT filter (+ and # wildcards) with latest value, unit, age and rate. Example filters: 'acme/dublin/packaging/#', '+/+/+/+/+/motor_temp'.", { type: "object", properties: { filter: { type: "string" }, limit: { type: "number" } } }, (i) => {
+      const m = matchTopics(String(i.filter || "#"));
+      return { matched: m.length, topics: m.slice(0, Number(i.limit) || 150).map(summary) };
+    }),
+    tool("get_history", "Bucketed time series (avg/min/max per bucket) for one numeric topic over a window. Use for trends.", { type: "object", properties: { topic: { type: "string" }, ...winProps, max_points: { type: "number", description: "Default 40, max 200." } }, required: ["topic"] }, (i) => {
+      const t = store.get(String(i.topic)); if (!t) throw new Error(`Unknown topic ${i.topic}`);
+      const { from, to } = win(i);
+      return { topic: t.topic, unit: t.unit, from: iso(from), to: iso(to), points: bucketed(t, from, to, Math.min(200, Number(i.max_points) || 40)).map((p) => ({ t: iso(p.ts), avg: r3(p.avg), min: r3(p.min), max: r3(p.max) })) };
+    }),
+    tool("get_stats", "Min/max/avg/stddev/first/last/change over a window for every topic matching a filter. Good for comparing machines.", { type: "object", properties: { filter: { type: "string" }, ...winProps }, required: ["filter"] }, (i) => {
+      const { from, to } = win(i);
+      const m = matchTopics(String(i.filter)).slice(0, 60);
+      return { from: iso(from), to: iso(to), matched: m.length, stats: m.map((t) => statsOf(t, from, to)) };
+    }),
+    tool("get_state_changes", "Transitions of a state/text topic (line state, alarms, batch phase) over a window with durations. Use for 'when did X go down / for how long'.", { type: "object", properties: { topic: { type: "string" }, ...winProps }, required: ["topic"] }, (i) => {
+      const t = store.get(String(i.topic)); if (!t) throw new Error(`Unknown topic ${i.topic}`);
+      const { from, to } = win(i);
+      const s = slice(t, from, to);
+      const ch = [];
+      for (let k = 0; k < s.v.length; k++) if (k === 0 || s.v[k] !== s.v[k - 1]) ch.push({ ts: s.ts[k], value: s.v[k] });
+      return { topic: t.topic, from: iso(from), to: iso(to), changes: ch.slice(-80).map((c, k, arr) => ({ at: iso(c.ts), value: c.value, minutes: r3(((arr[k + 1]?.ts ?? to) - c.ts) / 60000, 1) })) };
+    }),
+    tool("find_anomalies", "Scan numeric topics matching a filter for spikes (|z| over threshold) and recent shifts (last 5 min vs window). Use for 'is anything wrong?'.", { type: "object", properties: { filter: { type: "string" }, ...winProps, z_threshold: { type: "number", description: "Default 3." } } }, (i) => {
+      const { from, to } = win(i);
+      const z = Number(i.z_threshold) || 3;
+      const out = [];
+      for (const t of matchTopics(String(i.filter || "#"))) {
+        const s = slice(t, from, to);
+        const pts = []; s.v.forEach((v, k) => typeof v === "number" && pts.push([s.ts[k], v]));
+        if (pts.length < 20) continue;
+        const mean = pts.reduce((a, p) => a + p[1], 0) / pts.length;
+        const sd = Math.sqrt(pts.reduce((a, p) => a + (p[1] - mean) ** 2, 0) / pts.length);
+        if (sd < 1e-9) continue;
+        let peak = pts[0]; for (const p of pts) if (Math.abs(p[1] - mean) > Math.abs(peak[1] - mean)) peak = p;
+        const recent = pts.filter((p) => p[0] > to - 300_000);
+        const rm = recent.length ? recent.reduce((a, p) => a + p[1], 0) / recent.length : mean;
+        const pz = (peak[1] - mean) / sd, sz = (rm - mean) / sd;
+        if (Math.abs(pz) >= z || Math.abs(sz) >= z / 2) out.push({ topic: t.topic, unit: t.unit, kind: Math.abs(sz) >= z / 2 ? "recent_shift" : "spike", mean: r3(mean), sd: r3(sd), peak: r3(peak[1]), peakAt: iso(peak[0]), peakZ: r3(pz, 2), last5MinMean: r3(rm), shiftZ: r3(sz, 2) });
+      }
+      out.sort((a, b) => Math.abs(b.peakZ) - Math.abs(a.peakZ));
+      return { from: iso(from), to: iso(to), count: out.length, findings: out.slice(0, 30) };
+    }),
+    tool("check_sequence_gaps", "Find missed (dropped) messages using sequence numbers. Works on topics carrying a seq field, e.g. the filler counters at acme/dublin/packaging/+/filler/counts. Returns per topic received vs missed, loss %, the longest gap and recent gaps. Use for data quality, 'did we lose any data' or 'can I trust these counts' questions.", { type: "object", properties: { filter: { type: "string", description: "Topic or MQTT filter (default all)." }, ...winProps, max_gaps: { type: "number", description: "Gaps to list per topic, most recent first (default 10)." } } }, (i) => {
+      const { from, to } = win(i);
+      const seqTopics = [...new Set([...matchTopics(String(i.filter || "#")).map((t) => t.topic), ...[...docs.keys()].filter((d) => mqttMatch(String(i.filter || "#"), d))].map(seqSource).filter(Boolean))];
+      if (!seqTopics.length) return { note: "No topics with a sequence number match that filter." };
+      return { from: iso(from), to: iso(to), topics: seqTopics.map((st) => {
+        const g = seqGaps(st, from, to);
+        const big = g.gaps.reduce((a, x) => (!a || x.missed > a.missed ? x : a), null);
+        return { topic: st.replace(/\/[^/]+$/, ""), received: g.received, missed: g.missed, lossPct: r3(g.lossPct, 2), restarts: g.restarts, gapCount: g.gaps.length,
+          longestGap: big && { at: iso(big.at), missed: big.missed, seconds: r3((big.at - big.lastSeenAt) / 1000, 1) },
+          recentGaps: g.gaps.slice(-(Number(i.max_gaps) || 10)).reverse().map((x) => ({ at: iso(x.at), afterSeq: x.afterSeq, nextSeq: x.nextSeq, missed: x.missed })) };
+      }).sort((a, b) => b.missed - a.missed) };
+    }),
+    tool("get_json_document", "Latest full nested JSON document for a document topic (work orders, batch records, robot and boiler diagnostics). Each field is also its own topic at <document topic>/<json path>, with history.", { type: "object", properties: { topic: { type: "string" } }, required: ["topic"] }, (i) => {
+      const d = docs.get(String(i.topic));
+      if (!d) throw new Error(`Not a JSON document topic. Documents: ${[...docs.keys()].join(", ")}`);
+      return { topic: String(i.topic), document: d };
+    }),
+    tool("spc_analysis", "Statistical process control for numeric topics, e.g. acme/dublin/packaging/+/filler/fill_weight. Builds an X̄-R (default), X̄-S or I-MR chart over the window, with control limits, Western Electric rule violations (1: beyond 3σ, 2: 2 of 3 beyond 2σ, 3: 4 of 5 beyond 1σ, 4: 8 in a row one side, 5: 6 trending, 6: range above UCL) and capability (Cp, Cpk, Pp, Ppk, % out of spec) against spec limits. fill_weight has spec 495-505 g, target 500 g; pass lsl/usl/target for other tags. Use for SPC, 'is the process in control', capability or Cpk questions.", { type: "object", properties: { filter: { type: "string", description: "Topic or MQTT filter." }, chart: { type: "string", enum: ["xbar-r", "xbar-s", "imr"] }, n: { type: "number", description: "Subgroup size 2-10 (default 5)." }, every: { type: "number", description: "Seconds between subgroups (default 60; I-MR default 10)." }, lsl: { type: "number" }, usl: { type: "number" }, target: { type: "number" }, ...winProps, max_violations: { type: "number", description: "Most recent violations per topic (default 10)." } }, required: ["filter"] }, (i) => {
+      const { from, to } = win(i), maxV = Math.min(50, Number(i.max_violations) || 10);
+      const topics = matchTopics(String(i.filter)).filter((t) => t.numeric).slice(0, 12);
+      if (!topics.length) return { note: "No numeric topics match that filter." };
+      const num = (k) => (i[k] == null ? undefined : Number(i[k]));
+      return { from: iso(from), to: iso(to), topics: topics.map((t) => {
+        const res = spcCalc(t.topic, from, to, { chart: i.chart, n: num("n"), every: num("every"), lsl: num("lsl"), usl: num("usl"), target: num("target") });
+        if (!res) return { topic: t.topic, note: "Too few readings in this window." };
+        const c = res.capability, byRule = {};
+        for (const v of res.violations) byRule[`${v.rule}: ${v.text}`] = (byRule[`${v.rule}: ${v.text}`] ?? 0) + 1;
+        return { topic: t.topic, unit: t.unit, chart: res.chart, subgroupSize: res.n, everySeconds: res.every, subgroups: res.points.length, status: res.violations.length ? "Out of control" : "In control",
+          limits: { x: { cl: r3(res.x.cl), ucl: r3(res.x.ucl), lcl: r3(res.x.lcl) }, [res.r.label]: { cl: r3(res.r.cl), ucl: r3(res.r.ucl), lcl: r3(res.r.lcl) } },
+          spec: { lsl: res.spec.lsl, target: res.spec.target, usl: res.spec.usl },
+          capability: { mean: r3(c.mean), sigmaWithin: r3(c.sigmaWithin), sigmaOverall: r3(c.sigmaOverall), cp: r3(c.cp, 2), cpk: r3(c.cpk, 2), pp: r3(c.pp, 2), ppk: r3(c.ppk, 2), outOfSpecPct: r3(c.outOfSpecPct, 2), readings: c.readings },
+          violationsByRule: byRule,
+          recentViolations: res.violations.slice(-maxV).reverse().map((v) => ({ at: iso(v.ts), rule: v.rule, text: v.text, value: r3(res.points.find((p) => p.ts === v.ts)?.x) })) };
+      }) };
+    }),
+    tool("predict_network_drift", "Current network-drift prediction per area (from the baseline predictor publishing <area>/network/prediction): status, drift risk %, latency now and 2-minute forecast, when the next drift is due, the reasons, and the predictor's own track record (drifts seen, predicted in advance, missed, false alarms, median warning lead time). Use for questions about network latency drift, whether a drift is coming, or how good the prediction is. For the risk over time, use get_history on <area>/network/prediction/drift_risk_pct.", { type: "object", properties: { area: { type: "string", description: "Optional area name, e.g. packaging." } } }, (i) => {
+      const preds = [...docs.keys()].filter((d) => d.endsWith("/network/prediction") && (!i.area || d.includes(`/${i.area}/`)));
+      if (!preds.length) return { note: "No predictions for that area." };
+      return {
+        method: "baseline-v1: early-warning z-scores (jitter, packet loss, retransmits, throughput vs 30-min median/MAD), latency trend projected 2 min, and the learned drift rhythm, combined into one risk. Drift = latency above 5000 ms.",
+        areas: preds.map((d) => ({ topic: d, prediction: docs.get(d) })),
+      };
+    }),
+    tool("show_chart", "Draw an interactive line chart in the user's chat for 1-6 numeric topics over a window. Use whenever a trend or comparison is clearer as a picture.", { type: "object", properties: { title: { type: "string" }, topics: { type: "array", items: { type: "string" } }, ...winProps }, required: ["title", "topics"] }, (i) => {
+      const topics = (Array.isArray(i.topics) ? i.topics : []).map(String).filter((t) => store.get(t)?.numeric).slice(0, 6);
+      if (!topics.length) throw new Error("None of those are numeric topics.");
+      const { from, to } = win(i);
+      chartSink?.({ title: String(i.title || "Chart"), topics, from, to });
+      return { shown: true, topics };
+    }),
+  ];
+}
+
+/* ------------------------------------------------------------------ *
+ * Charts (one panel per unit, so there's never a second y-axis).
+ * ------------------------------------------------------------------ */
+const SERIES = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6"].map((v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim());
+const shortName = (t) => t.split("/").slice(-3).join("/");
+const timeFmt = (d) => new Date(d).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+/* Chart time window: follows now until zoomed/panned, then fixed until reset. Clamped to retention. */
+function makeWin(minutes) {
+  return {
+    minutes, fixed: null,
+    range() { const n = Date.now(); return this.fixed || { from: n - this.minutes * 60_000, to: n }; },
+    get live() { return !this.fixed; },
+    set(f, t) {
+      const n = Date.now();
+      const s = Math.min(RETENTION_MS, Math.max(60_000, t - f));
+      let end = Math.min(n, (f + t) / 2 + s / 2), start = end - s;
+      if (start < n - RETENTION_MS) { start = n - RETENTION_MS; end = start + s; }
+      this.fixed = n - end < 2000 && Math.abs(s - this.minutes * 60_000) < 1000 ? null : { from: start, to: end };
+    },
+    zoomIn() { const { from, to } = this.range(), q = (to - from) / 4; this.set(from + q, to - q); },
+    zoomOut() { const { from, to } = this.range(), h = (to - from) / 2; this.set(from - h, to + h); },
+    pan(dir) {
+      const { from, to } = this.range(), span = to - from, n = Date.now();
+      let start = Math.max(n - RETENTION_MS, from + (dir * span) / 4), end = start + span;
+      if (end > n) { end = n; start = n - span; }
+      this.fixed = n - end < 2000 && Math.abs(span - this.minutes * 60_000) < 1000 ? null : { from: start, to: end };
+    },
+    reset() { this.fixed = null; },
+    setMinutes(m) { this.minutes = m; this.fixed = null; },
+  };
+}
+/** Zoom/pan/reset buttons for a window; calls rerender after each change. */
+function zoomControls(win, rerender, compact = false) {
+  const el = document.createElement("div");
+  el.className = `zoom-controls ${compact ? "compact" : ""}`;
+  const { from, to } = win.range();
+  el.innerHTML = `${!compact && !win.live ? `<span class="small muted zoom-range">${timeFmt(from)}–${timeFmt(to)}</span>` : ""}
+    <button data-z="left" title="Pan back in time" aria-label="Pan back in time">‹</button>
+    <button data-z="in" title="Zoom in" aria-label="Zoom in">＋</button>
+    <button data-z="out" title="Zoom out" aria-label="Zoom out">－</button>
+    <button data-z="right" title="Pan forward in time" aria-label="Pan forward in time" ${win.live ? "disabled" : ""}>›</button>
+    <button data-z="reset" class="reset ${win.live ? "" : "on"}" title="Reset to live" aria-label="Reset to live" ${win.live ? "disabled" : ""}>↺${compact ? "" : " Live"}</button>`;
+  el.onclick = (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    ({ left: () => win.pan(-1), right: () => win.pan(1), in: () => win.zoomIn(), out: () => win.zoomOut(), reset: () => win.reset() })[b.dataset.z]();
+    rerender();
+  };
+  return el;
+}
+function drawChart(el, topics, from, to, height = 200, onZoom, markers = []) {
+  el.innerHTML = "";
+  const groups = d3.groups(topics, (t) => store.get(t)?.unit ?? "");
+  for (const [unit, ts] of groups) {
+    const wrap = document.createElement("div");
+    wrap.className = "chart";
+    el.appendChild(wrap);
+    const W = Math.max(260, wrap.clientWidth || el.clientWidth || 600), H = height;
+    const m = { t: 16, r: 10, b: 22, l: 44 };
+    const series = ts.map((t) => ({ t, color: SERIES[topics.indexOf(t) % SERIES.length], pts: bucketed(store.get(t), from, to, 240) }));
+    const all = series.flatMap((s) => s.pts);
+    const x = d3.scaleTime().domain([from, to]).range([m.l, W - m.r]);
+    const y = d3.scaleLinear().domain(d3.extent(all, (p) => p.avg).map((v, i) => v ?? i)).nice().range([H - m.b, m.t]);
+    const svg = d3.select(wrap).append("svg").attr("viewBox", `0 0 ${W} ${H}`).attr("height", H).attr("role", "img").attr("aria-label", `Line chart: ${ts.map(shortName).join(", ")}`);
+    const tickFmt = to - from < 15 * 60_000 ? (d) => new Date(d).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : timeFmt;
+    svg.append("g").attr("transform", `translate(0,${H - m.b})`).call(d3.axisBottom(x).ticks(Math.max(2, Math.floor(W / (to - from < 15 * 60_000 ? 170 : 110)))).tickFormat(tickFmt).tickSizeOuter(0))
+      .call((g) => g.selectAll("text").attr("fill", "var(--muted)").attr("font-size", 11)).call((g) => g.selectAll("line,path").attr("stroke", "var(--line-2)"));
+    svg.append("g").attr("transform", `translate(${m.l},0)`).call(d3.axisLeft(y).ticks(4).tickSize(-(W - m.l - m.r)))
+      .call((g) => g.select(".domain").remove()).call((g) => g.selectAll("line").attr("stroke", "var(--line)")).call((g) => g.selectAll("text").attr("fill", "var(--muted)").attr("font-size", 11));
+    if (unit) svg.append("text").attr("x", m.l).attr("y", 10).attr("fill", "var(--muted)").attr("font-size", 11).text(unit);
+    for (const t of markers) if (t >= from && t <= to) svg.append("line").attr("x1", x(t)).attr("x2", x(t)).attr("y1", m.t).attr("y2", H - m.b).attr("stroke", "var(--critical)").attr("stroke-dasharray", "3 3").attr("opacity", 0.8);
+    const line = d3.line().x((p) => x(p.ts)).y((p) => y(p.avg)).curve(d3.curveMonotoneX);
+    for (const s of series) {
+      svg.append("path").datum(s.pts).attr("fill", "none").attr("stroke", s.color).attr("stroke-width", 2).attr("stroke-linejoin", "round").attr("d", line);
+      const last = s.pts[s.pts.length - 1];
+      if (last) svg.append("circle").attr("cx", x(last.ts)).attr("cy", y(last.avg)).attr("r", 3.5).attr("fill", s.color).attr("stroke", "var(--page)").attr("stroke-width", 2);
+    }
+    if (!all.length) svg.append("text").attr("x", W / 2).attr("y", H / 2).attr("text-anchor", "middle").attr("fill", "var(--muted)").text("No data in this window");
+    // Crosshair + tooltip
+    const cross = svg.append("line").attr("y1", m.t).attr("y2", H - m.b).attr("stroke", "var(--line-2)").attr("visibility", "hidden");
+    const dots = series.map((s) => svg.append("circle").attr("r", 4).attr("fill", s.color).attr("stroke", "var(--page)").attr("stroke-width", 2).attr("visibility", "hidden"));
+    const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true; wrap.appendChild(tip);
+    const brush = svg.append("rect").attr("y", m.t).attr("height", H - m.t - m.b).attr("fill", "var(--accent)").attr("fill-opacity", 0.15).attr("stroke", "var(--accent)").attr("stroke-opacity", 0.5).attr("visibility", "hidden");
+    let dragX = null;
+    svg.append("rect").attr("x", m.l).attr("y", m.t).attr("width", W - m.l - m.r).attr("height", H - m.t - m.b).attr("fill", "transparent")
+      .style("cursor", onZoom ? "crosshair" : null)
+      .on("pointerdown", (ev) => { if (!onZoom) return; dragX = d3.pointer(ev)[0]; ev.target.setPointerCapture?.(ev.pointerId); })
+      .on("pointerup", (ev) => {
+        if (dragX == null) return;
+        const x1 = Math.max(m.l, Math.min(W - m.r, d3.pointer(ev)[0])), x0 = dragX;
+        dragX = null; brush.attr("visibility", "hidden");
+        if (Math.abs(x1 - x0) > 6) onZoom(x.invert(Math.min(x0, x1)).getTime(), x.invert(Math.max(x0, x1)).getTime());
+      })
+      .on("pointermove.brush", (ev) => {
+        if (dragX == null) return;
+        const x1 = Math.max(m.l, Math.min(W - m.r, d3.pointer(ev)[0]));
+        brush.attr("x", Math.min(dragX, x1)).attr("width", Math.abs(x1 - dragX)).attr("visibility", "visible");
+      })
+      .on("pointermove", (ev) => {
+        const [px] = d3.pointer(ev);
+        const tx = x.invert(px).getTime();
+        let rows = [], at = null;
+        series.forEach((s, k) => {
+          const i = d3.bisector((p) => p.ts).center(s.pts, tx); const p = s.pts[i];
+          if (!p) { dots[k].attr("visibility", "hidden"); return; }
+          at = at ?? p.ts;
+          dots[k].attr("cx", x(p.ts)).attr("cy", y(p.avg)).attr("visibility", "visible");
+          rows.push(`<div><span style="background:${s.color}"></span>${shortName(s.t)}: <b>${p.avg.toFixed(2)}</b>${unit ? " " + unit : ""}</div>`);
+        });
+        if (at == null) return;
+        cross.attr("x1", x(at)).attr("x2", x(at)).attr("visibility", "visible");
+        tip.innerHTML = `<div class="t">${new Date(at).toLocaleTimeString()}</div>${rows.join("")}`;
+        tip.hidden = false;
+        const scale = wrap.clientWidth / W;
+        const left = x(at) * scale;
+        tip.style.top = "8px";
+        tip.style.left = left > wrap.clientWidth / 2 ? `${left - tip.offsetWidth - 12}px` : `${left + 12}px`;
+      })
+      .on("pointerleave", () => { cross.attr("visibility", "hidden"); dots.forEach((d) => d.attr("visibility", "hidden")); tip.hidden = true; });
+    if (ts.length > 1) {
+      const lg = document.createElement("div"); lg.className = "chart-legend";
+      lg.innerHTML = series.map((s) => `<span><i style="background:${s.color}"></i>${shortName(s.t)}</span>`).join("");
+      wrap.appendChild(lg);
+    }
+  }
+}
+
+/** SPC chart into el: X̄ (or individuals) with control limits and rule hits, the spread chart, and capability. */
+const spcType = new Map(); // topic -> chart type
+function drawSpc(el, topic, from, to, rerender) {
+  const chart = spcType.get(topic) || "xbar-r", unit = store.get(topic)?.unit || "";
+  const res = spcCalc(topic, from, to, { chart });
+  const f2 = (v, dp = 2) => (v == null || !isFinite(v) ? "–" : v.toFixed(dp));
+  const cls = (v) => (v == null ? "" : v >= 1.33 ? "good" : v >= 1 ? "warn" : "bad");
+  el.innerHTML = `<div class="spc-head"><div class="seg">${[["xbar-r", "X̄-R"], ["xbar-s", "X̄-S"], ["imr", "I-MR"]].map(([id, l]) => `<button data-c="${id}" aria-pressed="${id === chart}">${l}</button>`).join("")}</div><span class="small spc-status"></span></div>`;
+  el.querySelector(".seg").onclick = (e) => { const b = e.target.closest("button"); if (b) { spcType.set(topic, b.dataset.c); rerender(); } };
+  if (!res) { el.insertAdjacentHTML("beforeend", `<div class="small muted">Not enough readings in this window for SPC.</div>`); return; }
+  const fired = [...new Set(res.violations.map((v) => v.rule))].sort();
+  const st = el.querySelector(".spc-status");
+  st.className = `small spc-status ${res.violations.length ? "bad" : "good"}`;
+  st.textContent = res.violations.length ? `⚠ ${res.violations.length} signal${res.violations.length === 1 ? "" : "s"} · rule${fired.length > 1 ? "s" : ""} ${fired.join(", ")}` : "✓ In control";
+  st.title = fired.map((r) => `Rule ${r}: ${SPC_RULES[r]}`).join("\n") + "\n\nLatest:\n" + res.violations.slice(-6).map((v) => `${timeFmt(v.ts)}: rule ${v.rule}`).join("\n");
+  const panel = (label, H, pts, key, lim, color, showLcl, ruleOf) => {
+    el.insertAdjacentHTML("beforeend", `<div class="spc-label small muted">${label}</div>`);
+    const wrap = document.createElement("div"); wrap.className = "chart"; el.appendChild(wrap);
+    const W = Math.max(260, wrap.clientWidth || el.clientWidth || 300), m = { t: 6, r: 10, b: key === "x" ? 20 : 4, l: 44 };
+    const vals = pts.map((p) => p[key]).filter((v) => v != null);
+    const lo = key === "x" ? Math.min(lim.lcl, ...vals) : 0, hi = Math.max(lim.ucl, ...vals), pad = (hi - lo) * 0.1;
+    const x = d3.scaleTime().domain([pts[0].ts, pts[pts.length - 1].ts]).range([m.l, W - m.r]);
+    const y = d3.scaleLinear().domain([lo - (key === "x" ? pad : 0), hi + pad]).range([H - m.b, m.t]);
+    const svg = d3.select(wrap).append("svg").attr("viewBox", `0 0 ${W} ${H}`).attr("height", H);
+    if (key === "x") svg.append("g").attr("transform", `translate(0,${H - m.b})`).call(d3.axisBottom(x).ticks(Math.max(2, Math.floor(W / 110))).tickFormat(timeFmt).tickSizeOuter(0)).call((g) => g.selectAll("text").attr("fill", "var(--muted)").attr("font-size", 10)).call((g) => g.selectAll("line,path").attr("stroke", "var(--line-2)"));
+    svg.append("g").attr("transform", `translate(${m.l},0)`).call(d3.axisLeft(y).ticks(key === "x" ? 4 : 2).tickFormat(d3.format(".1f"))).call((g) => g.select(".domain").remove()).call((g) => g.selectAll("line").attr("stroke", "var(--line)")).call((g) => g.selectAll("text").attr("fill", "var(--muted)").attr("font-size", 10));
+    const hl = (v, stroke, dash) => svg.append("line").attr("x1", m.l).attr("x2", W - m.r).attr("y1", y(v)).attr("y2", y(v)).attr("stroke", stroke).attr("stroke-dasharray", dash);
+    hl(lim.ucl, "var(--critical)", "4 3"); hl(lim.cl, "var(--muted)", "2 3"); if (showLcl && lim.lcl > 0) hl(lim.lcl, "var(--critical)", "4 3");
+    const ok = pts.filter((p) => p[key] != null);
+    svg.append("path").datum(ok).attr("fill", "none").attr("stroke", color).attr("stroke-width", 1.4).attr("d", d3.line().x((p) => x(p.ts)).y((p) => y(p[key])));
+    for (const p of ok) {
+      const bad = ruleOf(p);
+      if (!bad && key !== "x") continue;
+      svg.append("circle").attr("cx", x(p.ts)).attr("cy", y(p[key])).attr("r", bad ? 3.2 : 1.8).attr("fill", bad ? "var(--critical)" : color)
+        .append("title").text(`${timeFmt(p.ts)} · ${p[key].toFixed(2)}${key === "x" && unit ? " " + unit : ""}${bad ? " · " + p.rules.map((r) => RULE_SHORT[r]).join(", ") : ""}`);
+    }
+  };
+  panel(`${res.chart === "imr" ? "Individuals" : `X̄ (n=${res.n}, every ${res.every} s)`} · UCL ${f2(res.x.ucl)} · CL ${f2(res.x.cl)} · LCL ${f2(res.x.lcl)} ${unit}`, 120, res.points, "x", res.x, "var(--accent)", true, (p) => p.rules.some((r) => r !== 6));
+  panel(`${res.r.label} · UCL ${f2(res.r.ucl)} · ${res.r.label}̄ ${f2(res.r.cl)}`, 56, res.points, "r", res.r, "#9085e9", false, (p) => p.rules.includes(6));
+  const c = res.capability;
+  el.insertAdjacentHTML("beforeend", `<div class="spc-cap small">${res.spec.lsl != null || res.spec.usl != null
+    ? `<span>Spec ${f2(res.spec.lsl, 1)}–${f2(res.spec.usl, 1)} ${unit}</span><span class="${cls(c.cp)}" title="Potential capability, within σ">Cp ${f2(c.cp)}</span><span class="${cls(c.cpk)}" title="Capability allowing for centring, within σ">Cpk ${f2(c.cpk)}</span><span class="${cls(c.ppk)}" title="Performance, overall σ">Ppk ${f2(c.ppk)}</span><span class="${c.outOfSpecPct ? "bad" : ""}">${f2(c.outOfSpecPct)}% out</span>`
+    : `<span class="muted">No spec limits for this tag: control limits only</span>`}<span class="muted">x̄ ${f2(c.mean)} · σ ${f2(c.sigmaWithin, 3)}</span></div>`);
+}
+
+/** Trend for text topics: a row of coloured state bands per topic, with time in each state. */
+function drawStates(el, topics, from, to) {
+  const dur = (ms) => (ms < 60_000 ? `${Math.round(ms / 1000)} s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)} min` : `${(ms / 3_600_000).toFixed(1)} h`);
+  const esc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const span = to - from;
+  const rows = topics.map((topic) => {
+    const t = store.get(topic), sl = slice(t, from, to);
+    const segs = [];
+    sl.v.forEach((v, k) => { if (k === 0 || v !== sl.v[k - 1]) segs.push({ state: String(v), from: sl.ts[k], to: to }); if (segs.length > 1) segs[segs.length - 2].to = segs[segs.length - 1].from; });
+    const states = [...new Set(segs.map((x) => x.state))];
+    const color = (st) => (/^(down|tripped|fault|stopped|warning)$/i.test(st) ? "var(--critical)" : SERIES[states.indexOf(st) % SERIES.length]);
+    const totals = states.map((st) => [st, segs.filter((x) => x.state === st).reduce((a, x) => a + x.to - x.from, 0)]).sort((a, b) => b[1] - a[1]);
+    return `<div class="st-row"><div class="mono small st-label">${esc(shortName(topic))}</div><div class="st-track">${segs.map((x) =>
+      `<div class="st-seg" style="left:${((x.from - from) / span) * 100}%;width:${Math.max(0.2, ((x.to - x.from) / span) * 100)}%;background:${color(x.state)}" title="${esc(x.state)} · ${timeFmt(x.from)}–${timeFmt(x.to)} (${dur(x.to - x.from)})"></div>`).join("") ||
+      `<div class="st-empty small muted">No history in this window</div>`}</div><div class="st-legend small">${totals.slice(0, 6).map(([st, ms]) => `<span><i style="background:${color(st)}"></i>${esc(st || "(empty)")} <span class="muted">${dur(ms)}</span></span>`).join("")}</div></div>`;
+  });
+  el.insertAdjacentHTML("beforeend", `<div class="state-timeline">${rows.join("")}<div class="st-axis small muted"><span>${timeFmt(from)}</span><span>${timeFmt(from + span / 2)}</span><span>${timeFmt(to)}</span></div></div>`);
+}
+
+/* ------------------------------------------------------------------ *
+ * Top bar
+ * ------------------------------------------------------------------ */
+const $ = (id) => document.getElementById(id);
+function renderTopbar() {
+  const fields = [...store.values()].filter((t) => t.source).length;
+  $("st-topics").textContent = `${store.size - fields + docs.size}${fields ? ` + ${fields} JSON fields` : ""}`;
+  const mps = mpsHistory.slice(-10).reduce((a, b) => a + b, 0) / Math.max(1, Math.min(10, mpsHistory.length));
+  $("st-mps").textContent = mps.toFixed(1);
+  const first = Math.min(...[...store.values()].map((t) => t.ts[0]));
+  $("st-hist").textContent = `${Math.round((Date.now() - first) / 60000)} min`;
+  const alarms = [...store.values()].filter(isAlarm);
+  $("st-alarms").textContent = alarms.length ? `${alarms.length} active` : "None";
+  $("st-alarm-led").classList.toggle("bad", alarms.length > 0);
+  $("st-alarm-wrap").title = alarms.map((a) => `${a.topic}: ${lastOf(a).value}`).join("\n");
+  const sp = d3.select("#spark"); sp.selectAll("*").remove();
+  if (mpsHistory.length > 1) {
+    const x = d3.scaleLinear().domain([0, 89]).range([0, 96]);
+    const y = d3.scaleLinear().domain([0, d3.max(mpsHistory) || 1]).range([24, 2]);
+    sp.append("path").datum(mpsHistory).attr("fill", "var(--accent)").attr("fill-opacity", 0.15).attr("d", d3.area().x((d, i) => x(i + 90 - mpsHistory.length)).y0(24).y1(y));
+    sp.append("path").datum(mpsHistory).attr("fill", "none").attr("stroke", "var(--accent)").attr("stroke-width", 1.5).attr("d", d3.line().x((d, i) => x(i + 90 - mpsHistory.length)).y(y));
+  }
+}
+const faultMenu = $("fault-menu");
+faultMenu.innerHTML = FAULTS.map(([n], i) => `<button data-i="${i}">${n}</button>`).join("");
+$("fault-btn").onclick = () => { faultMenu.hidden = !faultMenu.hidden; $("fault-btn").setAttribute("aria-expanded", String(!faultMenu.hidden)); };
+faultMenu.onclick = (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  const [name, key] = FAULTS[Number(b.dataset.i)];
+  plant.inject(name, key, 240);
+  faultMenu.hidden = true;
+  $("fault-btn").textContent = `⚡ ${name.split(",")[0]} (4 min)`;
+  setTimeout(() => ($("fault-btn").textContent = "⚡ Inject fault"), 240_000);
+};
+document.addEventListener("click", (e) => { if (!e.target.closest(".fault-wrap")) faultMenu.hidden = true; });
+
+/* ------------------------------------------------------------------ *
+ * Topic graph (d3-force on canvas)
+ * ------------------------------------------------------------------ */
+const LEVELS = ["#eceeef", "#9085e9", "#3987e5", "#199e70", "#c98500", "#7f878f"];
+const LEVEL_NAMES = ["Enterprise", "Site", "Area", "Line / unit", "Cell", "Tag"];
+const JSON_COLOR = "#d55181";
+$("legend").innerHTML = LEVEL_NAMES.map((n, i) => `<span><i style="background:${LEVELS[i]}"></i>${n}</span>`).join("") + `<span><i style="background:${JSON_COLOR}"></i>JSON document</span><span><i style="background:var(--critical)"></i>Alarm / down</span>`;
+const canvas = $("graph"), ctx = canvas.getContext("2d");
+let cards = [], hover = null, transform = d3.zoomIdentity, W = 800, H = 600;
+let layout = "force"; // "force" | "tree"
+const nodes = [], links = [], byId = new Map();
+for (const topic of [...store.keys()].sort()) {
+  const parts = topic.split("/");
+  parts.forEach((name, i) => {
+    const id = parts.slice(0, i + 1).join("/");
+    if (!byId.has(id)) {
+      const n = { id, name, depth: i, leaf: false, json: !!docOf(id), parent: i > 0 ? byId.get(parts.slice(0, i).join("/")) : null, kids: [] };
+      n.parent?.kids.push(n);
+      byId.set(id, n); nodes.push(n);
+      if (i > 0) links.push({ source: parts.slice(0, i).join("/"), target: id });
+    }
+  });
+  byId.get(topic).leaf = true;
+}
+const sim = d3.forceSimulation(nodes)
+  .force("link", d3.forceLink(links).id((d) => d.id).distance((l) => (l.target.leaf ? 16 : 46 - l.target.depth * 5)).strength(0.9))
+  .force("charge", d3.forceManyBody().strength((d) => (d.leaf ? -18 : -160)))
+  .force("center", d3.forceCenter(0, 0))
+  .force("collide", d3.forceCollide((d) => (d.leaf ? 4 : 10)));
+for (let i = 0; i < 300; i++) sim.tick();
+sim.alpha(0.05);
+for (const n of nodes) { n.dx = n.x; n.dy = n.y; n.op = 1; }
+
+/* Left-to-right tree: ISA-95 levels as columns, collapsible branches. */
+const ROW = 24, COL = 165;
+// Cells and JSON documents start folded; inside a document everything stays open, so unfolding it shows the whole structure.
+const treeCollapsed = new Set(nodes.filter((n) => !n.leaf && (n.depth >= 4 || n.json) && !n.parent?.json).map((n) => n.id));
+// Search: topic path or current value contains the text (or matches an MQTT filter with + / #).
+// In the tree, matching branches open and everything else is hidden; in the network, everything else dims.
+let treeFilter = "", keep = null;
+function computeKeep() {
+  // Several terms separated by commas match any of them (used when highlighting topics from a chat answer).
+  const terms = treeFilter.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+  if (!terms.length) { keep = null; return; }
+  keep = new Set();
+  for (const n of nodes) {
+    if (!n.leaf) continue;
+    const t = store.get(n.id);
+    const hit = terms.some((f) => (/[+#]/.test(f) ? mqttMatch(f, n.id.toLowerCase()) : n.id.toLowerCase().includes(f) || String(lastOf(t).value).toLowerCase().includes(f)));
+    if (hit) for (let p = n; p; p = p.parent) keep.add(p.id);
+  }
+}
+const hiddenIn = (n) => {
+  if (keep && !keep.has(n.id)) { let p = n.parent; while (p && !keep.has(p.id)) p = p.parent; return p || nodes[0]; }
+  if (keep) return null;
+  for (let p = n.parent; p; p = p.parent) if (treeCollapsed.has(p.id)) return p;
+  return null;
+};
+function layoutTree() {
+  const root = d3.hierarchy(nodes[0], (n) => (keep ? n.kids.filter((k) => keep.has(k.id)) : treeCollapsed.has(n.id) ? null : n.kids));
+  // Cluster layout puts every tag in the last column, so tag labels never run into the next level.
+  d3.cluster().nodeSize([ROW, COL]).separation((a, b) => (a.parent === b.parent ? 1 : 1.4))(root);
+  const placed = new Set();
+  root.each((h) => { h.data.tx = h.y; h.data.ty = h.x; placed.add(h.data); });
+  for (const n of nodes) if (!placed.has(n)) { let a = hiddenIn(n); while (a && !placed.has(a)) a = hiddenIn(a) || a.parent; a = a || nodes[0]; n.tx = a.tx; n.ty = a.ty; }
+}
+layoutTree();
+const levelOf = (n) => (n.leaf ? "Tag" : n.json ? "JSON" : ["Enterprise", "Site", "Area", "Line", "Cell"][Math.min(n.depth, 4)]);
+const visible = (n) => layout === "force" || !hiddenIn(n);
+
+function resizeCanvas() {
+  const r = canvas.getBoundingClientRect(); if (!r.width) return;
+  W = r.width; H = r.height;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+function fitGraph() {
+  if (layout === "tree") {
+    const vis = nodes.filter(visible);
+    if (!vis.length) return;
+    const xs = d3.extent(vis, (n) => n.tx), ys = d3.extent(vis, (n) => n.ty);
+    // Fit the width (staying readable) and start at the top; scroll for the rest.
+    const k = Math.max(0.8, Math.min(1.1, (W - 40) / (xs[1] - xs[0] + 260)));
+    const y0 = ys[1] - ys[0] + 40 < H / k ? H / 2 - k * (ys[0] + ys[1]) / 2 : 24 - k * ys[0];
+    transform = d3.zoomIdentity.translate(24 - k * xs[0], y0).scale(k);
+  } else {
+    const hits = keep ? nodes.filter((n) => n.leaf && keep.has(n.id)) : [];
+    const fit = hits.length ? hits : nodes;
+    const xs = d3.extent(fit, (n) => n.x), ys = d3.extent(fit, (n) => n.y);
+    const k = Math.min(W / (xs[1] - xs[0] + 160), H / (ys[1] - ys[0] + 160), hits.length === 1 ? 3 : 4);
+    transform = d3.zoomIdentity.translate(W / 2 - k * (xs[0] + xs[1]) / 2, H / 2 - k * (ys[0] + ys[1]) / 2).scale(k);
+  }
+  d3.select(canvas).call(zoom.transform, transform);
+}
+// In tree mode the wheel scrolls (ctrl/⌘ + wheel zooms); in force mode it zooms.
+const zoom = d3.zoom().scaleExtent([0.3, 8])
+  .filter((ev) => (ev.type === "wheel" ? layout === "force" || ev.ctrlKey || ev.metaKey : !ev.button))
+  .on("zoom", (ev) => { transform = ev.transform; });
+d3.select(canvas).call(zoom).on("dblclick.zoom", null);
+canvas.addEventListener("wheel", (ev) => {
+  if (layout !== "tree" || ev.ctrlKey || ev.metaKey) return;
+  ev.preventDefault();
+  d3.select(canvas).call(zoom.translateBy, -ev.deltaX / transform.k, -ev.deltaY / transform.k);
+}, { passive: false });
+
+function nodeAt(ev) {
+  const [px, py] = d3.pointer(ev, canvas);
+  const [gx, gy] = transform.invert([px, py]);
+  if (layout === "force") return sim.find(gx, gy, 12 / transform.k);
+  // Hit the dot or its label row
+  return nodes.find((n) => visible(n) && Math.abs(gy - n.ty) < ROW / 2 - 1 && gx > n.tx - 10 && gx < n.tx + (n.leaf ? 250 : COL - 10)) || null;
+}
+canvas.addEventListener("pointermove", (ev) => {
+  const n = nodeAt(ev);
+  hover = n?.leaf ? n.id : null;
+  canvas.style.cursor = n ? "pointer" : "grab";
+  renderHover();
+});
+canvas.addEventListener("pointerleave", () => { hover = null; renderHover(); });
+canvas.addEventListener("click", (ev) => {
+  const n = nodeAt(ev);
+  if (!n) return;
+  if (n.leaf) return openCard(n.id);
+  if (layout === "force") { if (docs.has(n.id)) openCard(n.id); return; } // a JSON document opens its raw JSON card
+  const [gx] = transform.invert(d3.pointer(ev, canvas));
+  if (n.rawX && gx >= n.rawX[0] && gx <= n.rawX[1]) return openCard(n.id);
+  treeCollapsed.has(n.id) ? treeCollapsed.delete(n.id) : treeCollapsed.add(n.id); layoutTree();
+});
+
+function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x, y, w, h, r) : ctx.rect(x, y, w, h); }
+function drawGraph() {
+  if (!W) return;
+  const now = Date.now();
+  const tree = layout === "tree";
+  // Ease displayed positions toward the active layout's targets
+  for (const n of nodes) {
+    const tx = tree ? n.tx : n.x, ty = tree ? n.ty : n.y;
+    n.dx += (tx - n.dx) * 0.18; n.dy += (ty - n.dy) * 0.18;
+    n.op += ((visible(n) ? 1 : 0) - n.op) * 0.2;
+  }
+  const hitCount = keep ? nodes.filter((n) => n.leaf && keep.has(n.id)).length : 0;
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(transform.x, transform.y); ctx.scale(transform.k, transform.k);
+  ctx.lineWidth = 1 / transform.k;
+  for (const l of links) {
+    const a = l.source, b = l.target;
+    if (b.op < 0.02) continue;
+    ctx.globalAlpha = b.op * (!tree && keep && !keep.has(b.id) ? 0.15 : 1);
+    ctx.strokeStyle = tree ? "#343a41" : "#262b30";
+    ctx.beginPath();
+    if (tree) { const sx = a.dx + (a.leaf ? 0 : 0), mx = (sx + b.dx) / 2; ctx.moveTo(sx, a.dy); ctx.bezierCurveTo(mx, a.dy, mx, b.dy, b.dx, b.dy); }
+    else { ctx.moveTo(a.dx, a.dy); ctx.lineTo(b.dx, b.dy); }
+    ctx.stroke();
+  }
+  for (const n of nodes) {
+    if (n.op < 0.02) continue;
+    const dim = !tree && keep && !keep.has(n.id), hit = !tree && keep && n.leaf && keep.has(n.id);
+    ctx.globalAlpha = n.op * (dim ? 0.12 : 1);
+    const t = n.leaf ? store.get(n.id) : null;
+    const alarm = t && isAlarm(t);
+    const r = tree ? (n.leaf ? 3.5 : 5.5) : n.leaf ? 2.4 + Math.min(2.6, ratePerMin(t, now) / 25) : 7.5 - Math.min(n.depth, 4) * 1.1;
+    const p = pulses.get(n.id), age = p ? now - p : Infinity;
+    if (n.leaf && age < 1100) {
+      ctx.beginPath(); ctx.arc(n.dx, n.dy, r + (age / 1100) * 7, 0, 2 * Math.PI);
+      ctx.strokeStyle = alarm ? `rgba(208,59,59,${1 - age / 1100})` : `rgba(59,139,230,${1 - age / 1100})`;
+      ctx.lineWidth = 1.2 / transform.k + 0.3; ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(n.dx, n.dy, r, 0, 2 * Math.PI);
+    ctx.fillStyle = alarm ? "#d03b3b" : n.leaf ? LEVELS[5] : n.json ? JSON_COLOR : LEVELS[Math.min(n.depth, 4)];
+    ctx.fill();
+    if (hit || cards.includes(n.id) || n.id === hover) { ctx.strokeStyle = cards.includes(n.id) || n.id === hover ? "#eceeef" : "#3b8be6"; ctx.lineWidth = 1.5 / transform.k; ctx.stroke(); }
+    if (tree) drawTreeLabel(n, t, alarm, r);
+    else if ((!n.leaf && !dim) || (hit && (hitCount <= 20 || transform.k > 2.4)) || (!keep && transform.k > 2.4) || cards.includes(n.id)) {
+      const fs = (n.leaf ? 9.5 : 12.5 - n.depth) / Math.max(transform.k, 0.6);
+      ctx.font = `${n.leaf ? 400 : 600} ${fs}px "IBM Plex Sans", sans-serif`;
+      ctx.textAlign = "center"; ctx.textBaseline = "top";
+      ctx.lineWidth = 3 / transform.k; ctx.strokeStyle = "#0c0e10"; ctx.strokeText(n.name, n.dx, n.dy + r + 2 / transform.k);
+      ctx.fillStyle = n.leaf ? "#b9bfc5" : "#eceeef"; ctx.fillText(n.name, n.dx, n.dy + r + 2 / transform.k);
+    }
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+function drawTreeLabel(n, t, alarm, r) {
+  let x = n.dx + r + 6;
+  const y = n.dy;
+  ctx.textBaseline = "middle"; ctx.textAlign = "left";
+  if (!n.leaf) {
+    // Chevron, name, level badge, and a count when folded
+    ctx.font = `600 13px "IBM Plex Mono", monospace`;
+    ctx.fillStyle = "#eceeef"; ctx.fillText(n.name, x, y);
+    x += ctx.measureText(n.name).width + 8;
+    const badge = levelOf(n);
+    ctx.font = `500 10.5px "IBM Plex Sans", sans-serif`;
+    const bw = ctx.measureText(badge).width + 10;
+    roundRect(x, y - 8, bw, 16, 4); ctx.fillStyle = "#1d2125"; ctx.fill(); ctx.strokeStyle = "#343a41"; ctx.lineWidth = 1 / transform.k; ctx.stroke();
+    ctx.fillStyle = n.json ? JSON_COLOR : LEVELS[Math.min(n.depth, 4)] === "#eceeef" ? "#b9bfc5" : LEVELS[Math.min(n.depth, 4)];
+    ctx.fillText(badge, x + 5, y + 0.5);
+    let cx = x + bw + 8;
+    if (docs.has(n.id)) { // "{ }" link that opens the raw JSON card
+      ctx.font = `500 11px "IBM Plex Mono", monospace`; ctx.fillStyle = JSON_COLOR;
+      const w = ctx.measureText("{ }").width;
+      ctx.fillText("{ }", cx, y + 0.5);
+      n.rawX = [cx - 3, cx + w + 3];
+      cx += w + 8;
+    }
+    if (treeCollapsed.has(n.id) && !keep) {
+      const count = nodes.filter((m) => m.leaf && m.id.startsWith(n.id + "/")).length;
+      ctx.fillStyle = "#7f878f"; ctx.font = `400 11px "IBM Plex Sans", sans-serif`;
+      ctx.fillText(`▸ ${count} tags`, cx, y + 0.5);
+    }
+  } else {
+    ctx.font = `400 12.5px "IBM Plex Mono", monospace`;
+    ctx.fillStyle = "#b9bfc5"; ctx.fillText(n.name, x, y);
+    x += ctx.measureText(n.name).width + 10;
+    ctx.font = `500 12.5px "IBM Plex Mono", monospace`;
+    ctx.fillStyle = alarm ? "#e66767" : "#eceeef";
+    ctx.fillText(fmt(t), x, y);
+  }
+}
+function setLayout(next) {
+  layout = next;
+  $("layout").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.l === next)));
+  $("tree-tools").hidden = next !== "tree";
+  $("tab-hint").textContent = next === "tree" ? "Click a branch to fold it · ⌘/Ctrl + scroll zooms" : "Drag to pan, scroll to zoom, click a tag for details";
+  if (keep) applyTreeFilter(false);
+  fitGraph();
+}
+$("layout").onclick = (e) => { const b = e.target.closest("button"); if (b) setLayout(b.dataset.l); };
+function applyTreeFilter(refit) {
+  computeKeep();
+  layoutTree();
+  const m = keep ? nodes.filter((n) => n.leaf && keep.has(n.id)).length : null;
+  $("tree-count").textContent = m == null ? "" : m ? `${m} of ${store.size} topics` : "No topics match";
+  if (refit) fitGraph();
+}
+$("tree-filter").oninput = (e) => { treeFilter = e.target.value; applyTreeFilter(true); };
+$("tree-filter").onkeydown = (e) => {
+  if (e.key === "Escape") { e.target.value = ""; treeFilter = ""; applyTreeFilter(true); }
+  if (e.key === "Enter" && keep) { const first = nodes.filter((n) => n.leaf && keep.has(n.id)).map((n) => n.id).sort()[0]; if (first) openCard(first); }
+};
+const clearTreeFilter = () => { $("tree-filter").value = ""; treeFilter = ""; keep = null; $("tree-count").textContent = ""; };
+$("expand-all").onclick = () => { clearTreeFilter(); treeCollapsed.clear(); layoutTree(); fitGraph(); };
+$("collapse-all").onclick = () => { clearTreeFilter(); treeCollapsed.clear(); nodes.forEach((n) => !n.leaf && n.depth >= 2 && treeCollapsed.add(n.id)); layoutTree(); fitGraph(); };
+function renderHover() {
+  const el = $("hover");
+  const t = hover && store.get(hover);
+  el.hidden = !t;
+  if (!t) return;
+  el.innerHTML = `<div class="mono small muted"></div><div class="v"></div><div class="small muted"></div>`;
+  el.children[0].textContent = t.topic;
+  el.children[1].textContent = fmt(t);
+  el.children[2].textContent = `${ratePerMin(t)} msg/min · ${Math.round((Date.now() - lastOf(t).ts) / 1000)} s ago`;
+}
+/* Trend cards: clicking tags stacks live cards beside the graph, newest first, each with its own range. */
+let detailChartAt = 0;
+const cardWins = new Map(); // topic -> time window
+const spcOn = new Set(); // cards showing SPC instead of the trend
+const MAX_CARDS = 8;
+function openCard(topic) { cards = [topic, ...cards.filter((c) => c !== topic)].slice(0, MAX_CARDS); renderDetail(); }
+function addToTrends(topics) { picked = [...new Set([...picked, ...topics])].slice(-6); showTab("explorer"); renderTrend(); syncTree(); }
+const escHtml = (x) => String(x).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+/** Pretty-printed, syntax-coloured JSON as HTML. */
+function jsonHtml(obj) {
+  return escHtml(JSON.stringify(obj, null, 2)).replace(/(&quot;(?:\\.|(?!&quot;).)*?&quot;)(\s*:)?|\b(true|false|null)\b|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
+    (m, str, colon, lit, num) => (str ? `<span class="${colon ? "j-key" : "j-str"}">${str}</span>${colon || ""}` : `<span class="${lit ? "j-lit" : "j-num"}">${m}</span>`));
+}
+/** Card with the whole latest message of a JSON document topic. */
+function rawCard(topic) {
+  const d = docs.get(topic), fields = [...store.values()].filter((t) => t.source === topic).length;
+  const updated = Date.parse(d.timestamp);
+  const c = document.createElement("div");
+  c.className = "card";
+  c.innerHTML = `<div class="card-head"><div class="mono small"></div><button class="icon-btn" data-a="close" aria-label="Close card">✕</button></div>
+    <div class="small muted">{ } Raw JSON · ${fields} fields · updated ${Math.max(0, Math.round((Date.now() - updated) / 1000))} s ago</div>
+    <pre class="json-view">${jsonHtml(d)}</pre>${seqSource(topic) ? gapSummaryHtml(seqGaps(seqSource(topic), Date.now() - 15 * 60_000, Date.now()), " · last 15 min") : ""}
+    <div class="card-foot"><span class="small muted">${ratePerMin(store.get([...store.keys()].find((k) => k.startsWith(topic + "/"))))} msg/min</span><span class="btns"><button class="btn mini" data-a="copy">Copy</button> <button class="btn mini" data-a="ask">Ask</button></span></div>`;
+  c.querySelector(".mono").textContent = topic.split("/").slice(-3).join("/");
+  c.querySelector(".mono").title = topic;
+  c.querySelector('[data-a="close"]').onclick = () => { cards = cards.filter((x) => x !== topic); renderDetail(); };
+  c.querySelector('[data-a="copy"]').onclick = (e) => { navigator.clipboard?.writeText(JSON.stringify(docs.get(topic), null, 2)).then(() => { e.target.textContent = "Copied"; setTimeout(() => (e.target.textContent = "Copy"), 1500); }).catch(() => {}); };
+  c.querySelector('[data-a="ask"]').onclick = () => { $("input").value = `Summarise the latest ${topic} document and anything unusual in it.`; $("input").focus(); };
+  return c;
+}
+function renderDetail() {
+  const el = $("cards");
+  cards = cards.filter((c) => store.has(c) || docs.has(c));
+  const wasHidden = el.hidden;
+  el.hidden = !cards.length;
+  if (wasHidden !== el.hidden) { resizeCanvas(); }
+  if (!cards.length) return;
+  const scroll = el.querySelector(".cards-scroll")?.scrollTop ?? 0;
+  el.innerHTML = `<div class="cards-head"><span class="small muted">${cards.length === 1 ? "1 card" : cards.length + " cards"}</span><span class="btns"><button class="btn" data-a="all">Compare all</button><button class="btn" data-a="clear">Clear</button></span></div><div class="cards-scroll"></div>`;
+  el.querySelector('[data-a="all"]').onclick = () => addToTrends(cards.filter((c) => store.has(c)));
+  el.querySelector('[data-a="clear"]').onclick = () => { cards = []; renderDetail(); };
+  const list = el.querySelector(".cards-scroll");
+  for (const topic of cards) {
+    if (docs.has(topic)) { list.appendChild(rawCard(topic)); continue; }
+    const t = store.get(topic);
+    if (!cardWins.has(topic)) cardWins.set(topic, makeWin(15));
+    const win = cardWins.get(topic), min = win.minutes, { from, to } = win.range();
+    const c = document.createElement("div");
+    c.className = "card";
+    c.innerHTML = `<div class="card-head"><div class="mono small"></div><button class="icon-btn" data-a="close" aria-label="Close card">✕</button></div>
+      <div class="card-row"><div class="v ${isAlarm(t) ? "bad" : ""}"></div><div class="seg">${[15, 60, 180].map((m) => `<button data-m="${m}" aria-pressed="${win.live && m === min}">${m < 60 ? m + "m" : m / 60 + "h"}</button>`).join("")}</div></div>
+      <div class="dchart"></div>
+      <div class="card-foot"><span class="small muted"></span><span class="btns">${t.numeric ? `<button class="btn mini ${spcOn.has(topic) ? "on" : ""}" data-a="spc" title="Statistical process control: control limits, rule violations and capability">SPC</button> ` : ""}${t.source ? '<button class="btn mini" data-a="raw" title="Show the raw JSON document">{ }</button> ' : ""}<button class="btn mini" data-a="trend">Trends</button> <button class="btn mini" data-a="ask">Ask</button></span></div>`;
+    c.querySelector(".mono").textContent = topic.split("/").slice(-3).join("/");
+    c.querySelector(".mono").title = topic;
+    c.querySelector(".v").textContent = fmt(t);
+    c.querySelector(".card-foot .muted").textContent = `${ratePerMin(t)} msg/min${t.source ? " · JSON field" : ""}`;
+    c.querySelector('[data-a="close"]').onclick = () => { cards = cards.filter((x) => x !== topic); renderDetail(); };
+    c.querySelector('[data-a="trend"]').onclick = () => addToTrends([topic]);
+    if (t.numeric) c.querySelector('[data-a="spc"]').onclick = () => { spcOn.has(topic) ? spcOn.delete(topic) : spcOn.add(topic); renderDetail(); };
+    if (t.source) c.querySelector('[data-a="raw"]').onclick = () => openCard(t.source);
+    c.querySelector('[data-a="ask"]').onclick = () => { $("input").value = `What has ${topic} been doing over the last hour?`; $("input").focus(); };
+    c.querySelector(".seg").onclick = (e) => { const b = e.target.closest("button"); if (b) { win.setMinutes(Number(b.dataset.m)); renderDetail(); } };
+    list.appendChild(c);
+    const sq = seqSource(topic), gaps = sq && seqGaps(sq, from, to);
+    if (t.numeric && spcOn.has(topic)) drawSpc(c.querySelector(".dchart"), topic, from, to, renderDetail);
+    else if (t.numeric) drawChart(c.querySelector(".dchart"), [topic], from, to, 110, (f, tt) => { win.set(f, tt); renderDetail(); }, gaps ? gaps.gaps.map((g) => g.at) : []);
+    else drawStates(c.querySelector(".dchart"), [topic], from, to);
+    if (gaps) c.querySelector(".dchart").insertAdjacentHTML("afterend", gapSummaryHtml(gaps));
+    c.querySelector(".dchart").after(zoomControls(win, renderDetail, true));
+  }
+  list.scrollTop = scroll;
+  detailChartAt = Date.now();
+}
+
+/* ------------------------------------------------------------------ *
+ * Explorer
+ * ------------------------------------------------------------------ */
+let picked = [`${ROOT}/packaging/line1/speed`, `${ROOT}/packaging/line2/speed`];
+const trendWin = makeWin(60);
+const collapsed = new Set();
+const rowEls = new Map();
+function buildTree() {
+  const root = { children: new Map() };
+  for (const topic of [...store.keys()].sort()) {
+    let node = root;
+    topic.split("/").forEach((name, i, parts) => {
+      const path = parts.slice(0, i + 1).join("/");
+      if (!node.children.has(name)) node.children.set(name, { name, path, children: new Map() });
+      node = node.children.get(name);
+    });
+  }
+  const frag = document.createDocumentFragment();
+  const walk = (node, depth, parentEl) => {
+    for (const c of node.children.values()) {
+      const leaf = c.children.size === 0;
+      const t = store.get(c.path);
+      const b = document.createElement("button");
+      b.className = `row ${leaf ? "" : "branch"}`;
+      b.style.paddingLeft = `${8 + depth * 14}px`;
+      b.dataset.path = c.path;
+      b.innerHTML = leaf ? `<span class="dot"></span><span class="name"></span><span class="val"></span>` : `<span class="chev">▾</span><span class="name"></span>`;
+      b.querySelector(".name").textContent = c.name;
+      parentEl.appendChild(b);
+      rowEls.set(c.path, b);
+      if (!leaf) {
+        const kids = document.createElement("div"); kids.dataset.kids = c.path; parentEl.appendChild(kids);
+        walk(c, depth + 1, kids);
+      }
+    }
+  };
+  walk(root, 0, frag);
+  $("tree").appendChild(frag);
+  $("tree").onclick = (e) => {
+    const b = e.target.closest(".row"); if (!b) return;
+    const p = b.dataset.path, t = store.get(p);
+    if (!t) { // branch
+      collapsed.has(p) ? collapsed.delete(p) : collapsed.add(p);
+      $("tree").querySelector(`[data-kids="${CSS.escape(p)}"]`).hidden = collapsed.has(p);
+      b.querySelector(".chev").textContent = collapsed.has(p) ? "▸" : "▾";
+      return;
+    }
+    picked = picked.includes(p) ? picked.filter((x) => x !== p) : [...picked, p].slice(-6);
+    syncTree(); renderTrend();
+  };
+}
+function syncTree() {
+  const f = $("filter").value.toLowerCase();
+  for (const [path, el] of rowEls) {
+    const t = store.get(path);
+    if (t) {
+      const i = picked.indexOf(path);
+      el.classList.toggle("picked", i >= 0);
+      el.querySelector(".dot").style.background = i >= 0 ? SERIES[i % SERIES.length] : "transparent";
+      const v = el.querySelector(".val"); v.textContent = fmt(t); v.classList.toggle("bad", isAlarm(t));
+      el.hidden = !!f && !path.toLowerCase().includes(f);
+    } else el.hidden = !!f && ![...store.keys()].some((k) => k.startsWith(path + "/") && k.toLowerCase().includes(f));
+  }
+  $("pick-note").textContent = picked.length ? `${picked.length} of 6 topics · click a topic to add or remove it` : "Click topics to chart them (text topics show as state timelines)";
+}
+$("filter").oninput = syncTree;
+function renderTrend() {
+  if ($("view-explorer").hidden) return;
+  if (!picked.length) { $("trend").innerHTML = `<div class="empty">Pick topics from the tree to compare their history.</div>`; return; }
+  const numeric = picked.filter((t) => store.get(t)?.numeric), text = picked.filter((t) => !numeric.includes(t));
+  const { from, to } = trendWin.range();
+  $("trend-zoom").replaceChildren(zoomControls(trendWin, renderTrend));
+  $("range").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(trendWin.live && Number(x.dataset.min) === trendWin.minutes)));
+  if (numeric.length) drawChart($("trend"), numeric, from, to, text.length ? 200 : 260, (f, t) => { trendWin.set(f, t); renderTrend(); });
+  else $("trend").innerHTML = "";
+  if (text.length) drawStates($("trend"), text, from, to);
+}
+$("range").onclick = (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  trendWin.setMinutes(Number(b.dataset.min));
+  renderTrend();
+};
+
+function showTab(name) {
+  const g = name === "graph";
+  $("tab-graph").setAttribute("aria-selected", String(g));
+  $("tab-explorer").setAttribute("aria-selected", String(!g));
+  $("view-graph").hidden = !g; $("view-explorer").hidden = g;
+  $("graph-tools").hidden = !g;
+  if (g) { resizeCanvas(); setLayout(layout); } else { $("tab-hint").textContent = "Charts refresh every 5 seconds"; syncTree(); renderTrend(); }
+}
+$("tab-graph").onclick = () => showTab("graph");
+$("tab-explorer").onclick = () => showTab("explorer");
+
+/* ------------------------------------------------------------------ *
+ * Chat
+ * ------------------------------------------------------------------ */
+const SUGGESTIONS = [
+  "Give me an overview of what's on the broker",
+  "Is anything abnormal in the last 30 minutes?",
+  "Compare OEE for line 1 and line 2 over the last 3 hours and chart it",
+  "When did packaging line 1 last go down, and for how long?",
+  "Chart the oven zone temperatures for the last hour",
+  "Which motors are running hottest right now?",
+  "Have we missed any filler counter messages in the last hour?",
+  "Is a network latency drift coming, and how well has it been predicted?",
+  "Run SPC on the filler fill weights: are they in control, and what is the Cpk?",
+];
+let turns = [];
+let sample = null, sampleChecked = false, busy = false, ctl = null;
+const msgs = $("messages");
+function instructions() {
+  const topics = [...store.values()].sort((a, b) => a.topic.localeCompare(b.topic)).map((t) => `${t.topic}${t.unit ? ` [${t.unit}]` : ""}${t.numeric ? "" : " (text)"}`).join("\n");
+  return `You are the assistant inside an MQTT broker dashboard. Answer questions about what is happening on the broker now and over the recorded history (up to 180 minutes), using the tools to read real data. Never invent values; if the data doesn't show something, say so.
+
+The broker is a Unified Namespace laid out to ISA-95: enterprise/site/area/line/cell/tag. It is a simulated food and beverage plant (packaging lines, mixers, an oven, CIP and utilities) running in the browser, with faults injected now and then. Some topics carry nested JSON documents (MES work orders per line, mixer batch records, a palletizer robot, boiler diagnostics). Each document is split into field topics at <document topic>/<json path>, e.g. acme/dublin/utilities/boiler/diagnostics/drum/pressure, each with its own history: numeric fields work with get_history and get_stats, text fields with get_state_changes, and get_json_document returns a whole document. The filler counter documents (packaging/<line>/filler/counts) carry a seq number per message and some messages are lost on purpose; use check_sequence_gaps for questions about missed or dropped data. Each area (packaging, processing, utilities) has network tags under <area>/network/ (latency_ms around 2500 ms that drifts to ~9000 ms about every 10 minutes, plus jitter, packet loss, throughput, retransmits, link_state); a baseline predictor publishes <area>/network/prediction with a drift risk and its own track record. Use predict_network_drift for questions about network drift. Filler fill_weight (spec 495-505 g, target 500 g) has occasional special causes (mean shifts, drifts, extra variation); use spc_analysis for SPC, control limits, rule violations and Cp/Cpk.
+
+How to work:
+- Prefer get_stats and find_anomalies for broad questions, get_history for one signal, get_state_changes for states, alarms and batch phases. Use exact topic names from the list below.
+- When a trend or comparison would help, call show_chart; the user sees the chart in the chat.
+- Use as few tool calls as you can; you have a limited number of rounds.
+- Answer concisely in Markdown: lead with the answer, include key numbers with units and local times, then brief detail. The user's local time zone offset is UTC${-new Date().getTimezoneOffset() / 60 >= 0 ? "+" : ""}${-new Date().getTimezoneOffset() / 60}.
+
+All ${store.size} topics:
+${topics}`;
+}
+function scrollDown() { msgs.scrollTop = msgs.scrollHeight; }
+function renderEmpty() {
+  msgs.innerHTML = "";
+  const box = document.createElement("div"); box.className = "suggest";
+  box.innerHTML = `<div class="notice">This demo runs a simulated plant in your browser with 3 hours of backfilled history. Asking Claude uses your own Claude usage and asks your permission the first time.</div>`;
+  for (const s of SUGGESTIONS) { const b = document.createElement("button"); b.textContent = s; b.onclick = () => send(s); box.appendChild(b); }
+  msgs.appendChild(box);
+}
+/* ------------------------------------------------------------------ *
+ * Topic links in answers: topic names become links that highlight the topic in the graph.
+ * ------------------------------------------------------------------ */
+const TOPIC_HREF = "#topic:";
+let topicIndex = null, topicIndexSize = -1;
+function getTopicIndex() {
+  if (topicIndexSize === store.size) return topicIndex;
+  const paths = new Set(), suffixes = new Map();
+  for (const t of store.keys()) { const parts = t.split("/"); for (let i = 1; i <= parts.length; i++) paths.add(parts.slice(0, i).join("/")); }
+  for (const p of paths) { const parts = p.split("/"); for (let i = 1; i <= parts.length - 2; i++) { const sx = parts.slice(i).join("/"); suffixes.set(sx, [...(suffixes.get(sx) ?? []), p]); } }
+  topicIndexSize = store.size;
+  return (topicIndex = { paths, suffixes });
+}
+/** The topic, branch or filter a piece of text refers to; a short path that fits several topics resolves to all of them, comma-separated. */
+function resolveTopic(text) {
+  const idx = getTopicIndex(), t = text.replace(/[.,;:)]+$/, "");
+  if (idx.paths.has(t)) return t;
+  if (/[+#]/.test(t)) return t;
+  const hits = idx.suffixes.get(t);
+  return hits && hits.length <= 12 ? hits.join(", ") : null;
+}
+/** Rewrites topic mentions in Markdown as links, leaving fenced code alone. */
+function linkTopics(mdText) {
+  const found = new Set();
+  const out = mdText.split(/(```[\s\S]*?```)/).map((chunk, i) => i % 2 ? chunk : chunk.replace(/`?([A-Za-z0-9_.\-+#]+(?:\/[A-Za-z0-9_.\-+#]+)+)`?/g, (whole, cand, offset, all) => {
+    if (all[offset - 1] === "[" || all.slice(offset - 2, offset) === "](") return whole;
+    const topic = resolveTopic(cand);
+    if (!topic) return whole;
+    found.add(topic);
+    const trail = cand.match(/[.,;:)]+$/)?.[0] ?? "", bare = cand.slice(0, cand.length - trail.length), tick = whole.startsWith("`");
+    return `[${tick ? "`" + bare + "`" : bare}](${TOPIC_HREF}${encodeURIComponent(topic)})${tick ? "" : trail}`;
+  })).join("");
+  return { md: out, topics: [...found] };
+}
+/** Highlights a topic, branch or filter (comma-separated for several) in the topic graph; a single tag also opens its card. */
+function highlightTopics(query) {
+  showTab("graph");
+  $("tree-filter").value = query; treeFilter = query; applyTreeFilter(true);
+  if (store.has(query) || docs.has(query)) openCard(query);
+}
+/** Chips under an answer for the topics it mentions and the ones its tools looked at. */
+function relatedChips(a, topics) {
+  a.querySelector(".related")?.remove();
+  if (!topics.length) return;
+  const box = document.createElement("div"); box.className = "related";
+  box.innerHTML = `<span class="small muted">Topics in this answer</span>`;
+  const short = (t) => (t.includes(",") ? `${t.split(",").length} × ${t.split(",")[0].trim().split("/").slice(-2).join("/")}` : t.split("/").slice(-3).join("/"));
+  for (const t of topics.slice(0, 8)) {
+    const b = document.createElement("button"); b.className = "related-chip mono"; b.textContent = short(t); b.title = t;
+    b.onclick = () => highlightTopics(t); box.appendChild(b);
+  }
+  // Highlight all covers tags and filters, not whole branches, which would light up everything under them.
+  const all = topics.filter((t) => store.has(t) || /[+#,]/.test(t));
+  if (all.length > 1) {
+    const b = document.createElement("button"); b.className = "related-chip all"; b.textContent = "⌖ Highlight all"; b.title = "Highlight all of these in the topic graph";
+    b.onclick = () => highlightTopics(all.join(", ")); box.appendChild(b);
+  }
+  a.appendChild(box);
+}
+function md(el, text) {
+  const linked = linkTopics(text);
+  el.innerHTML = DOMPurify.sanitize(marked.parse(linked.md));
+  el.querySelectorAll(`a[href^="${TOPIC_HREF}"]`).forEach((link) => {
+    link.className = "topic-link"; link.title = "Highlight in the topic graph";
+    link.onclick = (e) => { e.preventDefault(); highlightTopics(decodeURIComponent(link.getAttribute("href").slice(TOPIC_HREF.length))); };
+  });
+  el.querySelectorAll('a:not(.topic-link)').forEach((link) => { link.target = "_blank"; link.rel = "noreferrer"; });
+  el.querySelectorAll("table").forEach((t) => { const w = document.createElement("div"); w.className = "tbl"; t.replaceWith(w); w.appendChild(t); });
+}
+const ERR = {
+  not_granted: "Claude isn't allowed for this page. You can allow it from the artifact's permissions menu.",
+  sampling_disabled: "Claude isn't available for this account.",
+  rate_limited: "Too many requests right now. Try again in a minute.",
+  session_expired: "Your session expired. Sign in again and retry.",
+  refused: "Claude declined that request. Try rephrasing it.",
+  prompt_too_large: "The conversation got too long. Start a new one with ↺.",
+  tools_unavailable: "This viewer can't run the chat's data tools.",
+};
+async function getSample() {
+  if (!sampleChecked) {
+    sampleChecked = true;
+    try { sample = window.claude ? await window.claude.use("sample") : null; } catch { sample = null; }
+  }
+  return sample;
+}
+async function send(text) {
+  text = text.trim();
+  if (!text || busy) return;
+  if (msgs.querySelector(".suggest")) msgs.innerHTML = "";
+  $("input").value = "";
+  const u = document.createElement("div"); u.className = "msg user"; u.textContent = text; msgs.appendChild(u);
+  const a = document.createElement("div"); a.className = "msg assistant"; msgs.appendChild(a);
+  const status = document.createElement("div"); status.className = "thinking"; status.textContent = "Thinking…"; a.appendChild(status);
+  const body = document.createElement("div"); body.className = "md"; a.appendChild(body);
+  scrollDown();
+  const s = await getSample();
+  if (!s) { status.remove(); a.innerHTML = `<div class="err">Chat needs Claude, which this view can't reach. Open the artifact on claude.ai while signed in.</div>`; return; }
+  busy = true; setComposer();
+  ctl = new AbortController();
+  turns.push({ role: "user", content: `[now: ${new Date().toISOString()}]\n${text}` });
+  // Charts and tool chips are inserted before the streaming text body.
+  chartSink = (c) => {
+    const box = document.createElement("div"); box.className = "chat-chart";
+    box.innerHTML = `<div class="title"></div><div class="c"></div>`;
+    box.querySelector(".title").textContent = c.title;
+    a.insertBefore(box, body);
+    requestAnimationFrame(() => drawChart(box.querySelector(".c"), c.topics, c.from, c.to, 180));
+  };
+  const toolTopics = new Set();
+  const tools = makeTools((name, input) => {
+    for (const x of [input.topic, input.filter, ...(Array.isArray(input.topics) ? input.topics : [])]) { const t = typeof x === "string" && x !== "#" ? resolveTopic(x) : null; if (t) toolTopics.add(t); }
+    const chip = document.createElement("div"); chip.className = "chip run";
+    chip.innerHTML = "<span></span>"; chip.firstChild.textContent = TOOL_LABEL(name, input);
+    a.insertBefore(chip, body); status.textContent = "Reading broker data…"; scrollDown();
+    return (ok) => { chip.classList.remove("run"); chip.classList.add(ok ? "done" : "bad"); };
+  });
+  try {
+    const recent = turns.slice(-12);
+    const res = await s([{ role: "user", content: instructions() }, ...recent], {
+      tools, signal: ctl.signal,
+      onText: ({ text }) => { status.remove(); md(body, text); scrollDown(); },
+    });
+    status.remove();
+    md(body, res.text);
+    relatedChips(a, [...new Set([...toolTopics, ...linkTopics(res.text).topics])]);
+    turns.push({ role: "assistant", content: res.text });
+    if (res.truncated) { const n = document.createElement("div"); n.className = "small muted"; n.textContent = "Answer cut short. Ask for less at a time."; a.appendChild(n); }
+  } catch (e) {
+    status.remove();
+    if (e && e.text && e.code !== "refused") md(body, e.text);
+    else if (e?.code === "refused") body.innerHTML = "";
+    turns.pop();
+    if (e?.code !== "cancelled") { const er = document.createElement("div"); er.className = "err"; er.textContent = ERR[e?.code] || "Something went wrong reaching Claude. Try again."; a.appendChild(er); }
+  } finally {
+    chartSink = null; busy = false; ctl = null; setComposer(); scrollDown();
+  }
+}
+function setComposer() {
+  const btn = $("send");
+  btn.textContent = busy ? "■" : "↑";
+  btn.setAttribute("aria-label", busy ? "Stop" : "Send");
+  btn.type = busy ? "button" : "submit";
+  btn.onclick = busy ? () => ctl?.abort() : null;
+}
+$("composer").onsubmit = (e) => { e.preventDefault(); send($("input").value); };
+$("input").onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send($("input").value); } };
+$("reset").onclick = () => { ctl?.abort(); turns = []; renderEmpty(); };
+
+/* ------------------------------------------------------------------ *
+ * Boot
+ * ------------------------------------------------------------------ */
+buildTree();
+renderEmpty();
+resizeCanvas();
+fitGraph();
+renderTopbar();
+window.addEventListener("resize", () => { resizeCanvas(); renderTrend(); });
+new ResizeObserver(() => { const w = W; resizeCanvas(); if (!w || Math.abs(w - W) > 40) fitGraph(); }).observe($("graph-main"));
+setInterval(() => {
+  liveTick();
+  renderTopbar();
+  if (!$("view-explorer").hidden) syncTree();
+  if (hover) renderHover();
+  if (cards.length && Date.now() - detailChartAt > 5000) renderDetail();
+  if (keep) applyTreeFilter(false); // values change, so value matches can too
+}, 1000);
+setInterval(renderTrend, 5000);
+(function loop() { if (!$("view-graph").hidden) drawGraph(); requestAnimationFrame(loop); })();
+</script>
