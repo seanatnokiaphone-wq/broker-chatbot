@@ -22,7 +22,8 @@ interface GLink {
 
 interface Props {
   live: Live;
-  selected: string | null;
+  /** Topics with an open trend card. */
+  selected: Set<string>;
   onSelect: (topic: string) => void;
 }
 
@@ -139,12 +140,12 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
           ctx.arc(n.x!, n.y!, r, 0, 2 * Math.PI);
           ctx.fillStyle = color;
           ctx.fill();
-          if (hit || n.id === selected || n.id === hover) {
-            ctx.strokeStyle = hit && n.id !== selected && n.id !== hover ? "#3987e5" : "#f0efec";
+          if (hit || selected.has(n.id) || n.id === hover) {
+            ctx.strokeStyle = hit && !selected.has(n.id) && n.id !== hover ? "#3987e5" : "#f0efec";
             ctx.lineWidth = 1.5 / scale;
             ctx.stroke();
           }
-          const showLabel = (!n.leaf && !dim) || (hit && (hits!.tags.size <= 20 || scale > 2.2)) || (!hits && scale > 2.2) || n.id === selected;
+          const showLabel = (!n.leaf && !dim) || (hit && (hits!.tags.size <= 20 || scale > 2.2)) || (!hits && scale > 2.2) || selected.has(n.id);
           if (showLabel) {
             const fontSize = Math.max(n.leaf ? 2.5 : 3.5, (n.leaf ? 10 : 12 - n.depth) / scale);
             ctx.font = `${n.leaf ? 400 : 600} ${fontSize}px Inter, sans-serif`;

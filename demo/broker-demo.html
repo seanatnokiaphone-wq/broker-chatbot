@@ -63,6 +63,25 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 #tree-tools { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .search.tree-filter { margin: 0; padding: 4px 8px; width: 250px; max-width: 100%; }
 .view { flex: 1; min-height: 0; position: relative; }
+#view-graph:not([hidden]) { display: flex; }
+.graph-main { position: relative; flex: 1; min-width: 0; }
+.cards { flex: none; width: 360px; display: flex; flex-direction: column; gap: 8px; padding: 10px; border-left: 1px solid var(--line); min-height: 0; }
+.cards[hidden] { display: none; }
+.cards-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.cards-head .btns { display: flex; gap: 6px; }
+.cards-head .btn { padding: 3px 9px; font-size: 11.5px; white-space: nowrap; }
+.cards-scroll { overflow-y: auto; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.card { flex: none; background: var(--panel); border: 1px solid var(--line-2); border-radius: 12px; padding: 10px 12px 8px; display: flex; flex-direction: column; gap: 4px; }
+.card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--ink-2); word-break: break-all; }
+.card-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.card .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.card .v.bad { color: var(--critical); }
+.card .seg button { padding: 2px 8px; font-size: 11px; }
+.card-foot { display: flex; justify-content: space-between; align-items: center; }
+.card-foot .btn.mini { padding: 2px 8px; font-size: 11px; }
+.card .state-timeline { padding: 4px 0; gap: 6px; }
+.card .st-label { display: none; }
+@media (max-width: 900px) { #view-graph:not([hidden]) { flex-direction: column; } .cards { width: auto; max-height: 45%; border-left: none; border-top: 1px solid var(--line); } }
 
 /* Graph */
 #graph { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
@@ -210,10 +229,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
         </div>
       </nav>
       <div class="view" id="view-graph">
-        <canvas id="graph"></canvas>
-        <div class="legend" id="legend"></div>
-        <div class="hover-card" id="hover" hidden></div>
-        <div class="detail" id="detail" hidden></div>
+        <div class="graph-main" id="graph-main">
+          <canvas id="graph"></canvas>
+          <div class="legend" id="legend"></div>
+          <div class="hover-card" id="hover" hidden></div>
+        </div>
+        <aside class="cards" id="cards" hidden></aside>
       </div>
       <div class="view" id="view-explorer" hidden>
         <div class="explorer">
@@ -880,7 +901,7 @@ const LEVEL_NAMES = ["Enterprise", "Site", "Area", "Line / unit", "Cell", "Tag"]
 const JSON_COLOR = "#d55181";
 $("legend").innerHTML = LEVEL_NAMES.map((n, i) => `<span><i style="background:${LEVELS[i]}"></i>${n}</span>`).join("") + `<span><i style="background:${JSON_COLOR}"></i>JSON document</span><span><i style="background:var(--critical)"></i>Alarm / down</span>`;
 const canvas = $("graph"), ctx = canvas.getContext("2d");
-let selected = null, hover = null, transform = d3.zoomIdentity, W = 800, H = 600;
+let cards = [], hover = null, transform = d3.zoomIdentity, W = 800, H = 600;
 let layout = "force"; // "force" | "tree"
 const nodes = [], links = [], byId = new Map();
 for (const topic of [...store.keys()].sort()) {
@@ -995,7 +1016,7 @@ canvas.addEventListener("pointerleave", () => { hover = null; renderHover(); });
 canvas.addEventListener("click", (ev) => {
   const n = nodeAt(ev);
   if (!n) return;
-  if (n.leaf) { selected = n.id; renderDetail(); }
+  if (n.leaf) openCard(n.id);
   else if (layout === "tree") { treeCollapsed.has(n.id) ? treeCollapsed.delete(n.id) : treeCollapsed.add(n.id); layoutTree(); }
 });
 
@@ -1041,9 +1062,9 @@ function drawGraph() {
     ctx.beginPath(); ctx.arc(n.dx, n.dy, r, 0, 2 * Math.PI);
     ctx.fillStyle = alarm ? "#d03b3b" : n.leaf ? LEVELS[5] : n.json ? JSON_COLOR : LEVELS[Math.min(n.depth, 4)];
     ctx.fill();
-    if (hit || n.id === selected || n.id === hover) { ctx.strokeStyle = n.id === selected || n.id === hover ? "#eceeef" : "#3b8be6"; ctx.lineWidth = 1.5 / transform.k; ctx.stroke(); }
+    if (hit || cards.includes(n.id) || n.id === hover) { ctx.strokeStyle = cards.includes(n.id) || n.id === hover ? "#eceeef" : "#3b8be6"; ctx.lineWidth = 1.5 / transform.k; ctx.stroke(); }
     if (tree) drawTreeLabel(n, t, alarm, r);
-    else if ((!n.leaf && !dim) || (hit && (hitCount <= 20 || transform.k > 2.4)) || (!keep && transform.k > 2.4) || n.id === selected) {
+    else if ((!n.leaf && !dim) || (hit && (hitCount <= 20 || transform.k > 2.4)) || (!keep && transform.k > 2.4) || cards.includes(n.id)) {
       const fs = (n.leaf ? 9.5 : 12.5 - n.depth) / Math.max(transform.k, 0.6);
       ctx.font = `${n.leaf ? 400 : 600} ${fs}px "IBM Plex Sans", sans-serif`;
       ctx.textAlign = "center"; ctx.textBaseline = "top";
@@ -1102,7 +1123,7 @@ function applyTreeFilter(refit) {
 $("tree-filter").oninput = (e) => { treeFilter = e.target.value; applyTreeFilter(true); };
 $("tree-filter").onkeydown = (e) => {
   if (e.key === "Escape") { e.target.value = ""; treeFilter = ""; applyTreeFilter(true); }
-  if (e.key === "Enter" && keep) { const first = nodes.filter((n) => n.leaf && keep.has(n.id)).map((n) => n.id).sort()[0]; if (first) { selected = first; renderDetail(); } }
+  if (e.key === "Enter" && keep) { const first = nodes.filter((n) => n.leaf && keep.has(n.id)).map((n) => n.id).sort()[0]; if (first) openCard(first); }
 };
 const clearTreeFilter = () => { $("tree-filter").value = ""; treeFilter = ""; keep = null; $("tree-count").textContent = ""; };
 $("expand-all").onclick = () => { clearTreeFilter(); treeCollapsed.clear(); layoutTree(); fitGraph(); };
@@ -1117,26 +1138,46 @@ function renderHover() {
   el.children[1].textContent = fmt(t);
   el.children[2].textContent = `${ratePerMin(t)} msg/min · ${Math.round((Date.now() - lastOf(t).ts) / 1000)} s ago`;
 }
+/* Trend cards: clicking tags stacks live cards beside the graph, newest first, each with its own range. */
 let detailChartAt = 0;
+const cardRange = new Map();
+const MAX_CARDS = 8;
+function openCard(topic) { cards = [topic, ...cards.filter((c) => c !== topic)].slice(0, MAX_CARDS); renderDetail(); }
+function addToTrends(topics) { picked = [...new Set([...picked, ...topics])].slice(-6); showTab("explorer"); renderTrend(); syncTree(); }
 function renderDetail() {
-  const el = $("detail");
-  const t = selected && store.get(selected);
-  el.hidden = !t;
-  if (!t) return;
-  el.innerHTML = `<div class="detail-head"><div class="mono small"></div><button class="icon-btn" aria-label="Close">✕</button></div>
-    <div class="v ${isAlarm(t) ? "bad" : ""}"></div><div class="small muted"></div><div class="dchart"></div>
-    <div class="actions"><button class="btn" data-a="trend">Open in trends</button><button class="btn" data-a="ask">Ask about this</button></div>`;
-  el.querySelector(".mono").textContent = t.topic;
-  el.querySelector(".v").textContent = fmt(t);
-  el.querySelector(".small.muted").textContent = `${ratePerMin(t)} msg/min · ${t.ts.length.toLocaleString()} messages recorded${t.source ? ` · field of JSON document ${t.source.split("/").slice(-2).join("/")}` : ""}`;
-  el.querySelector(".icon-btn").onclick = () => { selected = null; renderDetail(); };
-  const btns = el.querySelectorAll("[data-a]");
-  btns.forEach((b) => (b.onclick = () => {
-    if (b.dataset.a === "trend") { if (!picked.includes(t.topic)) picked.push(t.topic); picked = picked.slice(-6); showTab("explorer"); renderTrend(); syncTree(); }
-    else { $("input").value = `What has ${t.topic} been doing over the last hour?`; $("input").focus(); }
-  }));
-  if (t.numeric) drawChart(el.querySelector(".dchart"), [t.topic], Date.now() - 30 * 60_000, Date.now(), 140);
-  else drawStates(el.querySelector(".dchart"), [t.topic], Date.now() - 60 * 60_000, Date.now());
+  const el = $("cards");
+  cards = cards.filter((c) => store.has(c));
+  const wasHidden = el.hidden;
+  el.hidden = !cards.length;
+  if (wasHidden !== el.hidden) { resizeCanvas(); }
+  if (!cards.length) return;
+  const scroll = el.querySelector(".cards-scroll")?.scrollTop ?? 0;
+  el.innerHTML = `<div class="cards-head"><span class="small muted">${cards.length === 1 ? "1 card" : cards.length + " cards"}</span><span class="btns"><button class="btn" data-a="all">Compare all</button><button class="btn" data-a="clear">Clear</button></span></div><div class="cards-scroll"></div>`;
+  el.querySelector('[data-a="all"]').onclick = () => addToTrends(cards);
+  el.querySelector('[data-a="clear"]').onclick = () => { cards = []; renderDetail(); };
+  const list = el.querySelector(".cards-scroll");
+  for (const topic of cards) {
+    const t = store.get(topic), min = cardRange.get(topic) ?? 15;
+    const c = document.createElement("div");
+    c.className = "card";
+    c.innerHTML = `<div class="card-head"><div class="mono small"></div><button class="icon-btn" data-a="close" aria-label="Close card">✕</button></div>
+      <div class="card-row"><div class="v ${isAlarm(t) ? "bad" : ""}"></div><div class="seg">${[15, 60, 180].map((m) => `<button data-m="${m}" aria-pressed="${m === min}">${m < 60 ? m + "m" : m / 60 + "h"}</button>`).join("")}</div></div>
+      <div class="dchart"></div>
+      <div class="card-foot"><span class="small muted"></span><span class="btns"><button class="btn mini" data-a="trend">Trends</button> <button class="btn mini" data-a="ask">Ask</button></span></div>`;
+    c.querySelector(".mono").textContent = topic.split("/").slice(-3).join("/");
+    c.querySelector(".mono").title = topic;
+    c.querySelector(".v").textContent = fmt(t);
+    c.querySelector(".card-foot .muted").textContent = `${ratePerMin(t)} msg/min${t.source ? " · JSON field" : ""}`;
+    c.querySelector('[data-a="close"]').onclick = () => { cards = cards.filter((x) => x !== topic); renderDetail(); };
+    c.querySelector('[data-a="trend"]').onclick = () => addToTrends([topic]);
+    c.querySelector('[data-a="ask"]').onclick = () => { $("input").value = `What has ${topic} been doing over the last hour?`; $("input").focus(); };
+    c.querySelector(".seg").onclick = (e) => { const b = e.target.closest("button"); if (b) { cardRange.set(topic, Number(b.dataset.m)); renderDetail(); } };
+    list.appendChild(c);
+    const now = Date.now();
+    if (t.numeric) drawChart(c.querySelector(".dchart"), [topic], now - min * 60_000, now, 110);
+    else drawStates(c.querySelector(".dchart"), [topic], now - min * 60_000, now);
+  }
+  list.scrollTop = scroll;
   detailChartAt = Date.now();
 }
 
@@ -1358,13 +1399,13 @@ resizeCanvas();
 fitGraph();
 renderTopbar();
 window.addEventListener("resize", () => { resizeCanvas(); renderTrend(); });
-new ResizeObserver(() => { const w = W; resizeCanvas(); if (!w || Math.abs(w - W) > 40) fitGraph(); }).observe($("view-graph"));
+new ResizeObserver(() => { const w = W; resizeCanvas(); if (!w || Math.abs(w - W) > 40) fitGraph(); }).observe($("graph-main"));
 setInterval(() => {
   liveTick();
   renderTopbar();
   if (!$("view-explorer").hidden) syncTree();
   if (hover) renderHover();
-  if (selected && Date.now() - detailChartAt > 5000) renderDetail();
+  if (cards.length && Date.now() - detailChartAt > 5000) renderDetail();
   if (keep) applyTreeFilter(false); // values change, so value matches can too
 }, 1000);
 setInterval(renderTrend, 5000);

@@ -22,7 +22,8 @@ const LEVEL_BADGE = ["Enterprise", "Site", "Area", "Line", "Cell"];
 
 interface Props {
   live: Live;
-  selected: string | null;
+  /** Topics with an open trend card. */
+  selected: Set<string>;
   onSelect: (topic: string) => void;
 }
 
@@ -150,7 +151,7 @@ export function TopicTree({ live, selected, onSelect }: Props) {
               <g
                 key={n.id}
                 transform={`translate(${x},${y})`}
-                className={`tree-node ${n.leaf ? "leaf" : "branch"} ${n.id === selected ? "selected" : ""}`}
+                className={`tree-node ${n.leaf ? "leaf" : "branch"} ${selected.has(n.id) ? "selected" : ""}`}
                 onClick={() => (n.leaf ? onSelect(n.id) : toggle(n.id))}
               >
                 <rect x={-8} y={-ROW / 2} width={n.leaf ? 360 : COL - 24} height={ROW} className="hit" />

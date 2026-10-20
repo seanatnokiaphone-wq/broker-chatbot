@@ -1,24 +1,26 @@
-import { Activity, Database, MessageSquare, Network, Radio, Rows3, X } from "lucide-react";
+import { Activity, Database, Network, Radio, Rows3 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Area, AreaChart, ResponsiveContainer, YAxis } from "recharts";
-import { display, getStatus, isAlarm, textValue, type Status } from "./api";
+import { getStatus, isAlarm, textValue, type Status } from "./api";
 import { SERIES, STATUS } from "./colors";
 import { Chat } from "./components/Chat";
 import { Explorer } from "./components/Explorer";
-import { HistoryChart } from "./components/HistoryChart";
-import { StateTimeline } from "./components/StateTimeline";
+import { TrendCards } from "./components/TrendCards";
 import { TopicGraph } from "./components/TopicGraph";
 import { TopicTree } from "./components/TopicTree";
 import { useLive } from "./useLive";
 
 type View = "graph" | "explorer";
+const MAX_CARDS = 8;
 
 export default function App() {
   const live = useLive();
   const [status, setStatus] = useState<Status | null>(null);
   const [view, setView] = useState<View>("graph");
   const [graphLayout, setGraphLayout] = useState<"network" | "tree">("network");
-  const [selected, setSelected] = useState<string | null>(null);
+  // Trend cards open over the topic graph, newest first.
+  const [cards, setCards] = useState<string[]>([]);
+  const openCard = (topic: string) => setCards((cs) => [topic, ...cs.filter((c) => c !== topic)].slice(0, MAX_CARDS));
   const [chartTopics, setChartTopics] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
 
@@ -36,7 +38,7 @@ export default function App() {
   const alarms = [...live.topics.values()].filter(isAlarm);
   const mps = live.mps.length ? live.mps[live.mps.length - 1].v : 0;
   const historyMin = status?.historyFrom ? Math.round((Date.now() - status.historyFrom) / 60_000) : 0;
-  const sel = selected ? live.topics.get(selected) : undefined;
+  const cardSet = new Set(cards);
   const rows = [...live.topics.values()];
   const fieldCount = rows.filter((r) => r.source).length;
   const topicCount = `${rows.length - fieldCount}${fieldCount ? ` + ${fieldCount} JSON fields` : ""}`;
@@ -98,37 +100,21 @@ export default function App() {
           </nav>
           {view === "graph" ? (
             <div className="graph-view">
-              {graphLayout === "network" ? (
-                <TopicGraph live={live} selected={selected} onSelect={setSelected} />
-              ) : (
-                <TopicTree live={live} selected={selected} onSelect={setSelected} />
-              )}
-              {sel && (
-                <div className="detail">
-                  <div className="detail-head">
-                    <div className="mono small">{sel.topic}</div>
-                    <button className="icon" onClick={() => setSelected(null)}>
-                      <X size={14} />
-                    </button>
-                  </div>
-                  <div className={`detail-value ${isAlarm(sel) ? "bad" : ""}`}>{display(sel)}</div>
-                  <div className="small muted">
-                    {sel.rate.toFixed(0)} msg/min · {sel.count.toLocaleString()} recorded
-                  </div>
-                  {sel.source && <div className="small muted">Field of JSON document <span className="mono">{sel.source.split("/").slice(-2).join("/")}</span></div>}
-                  {sel.value != null ? (
-                    <HistoryChart topics={[sel.topic]} from={Date.now() - 15 * 60_000} to={Date.now()} units={{ [sel.topic]: sel.unit }} live height={150} />
-                  ) : (
-                    <StateTimeline topics={[sel.topic]} from={Date.now() - 60 * 60_000} to={Date.now()} live />
-                  )}
-                  <div className="detail-actions">
-                    <button onClick={() => (chartTopics.includes(sel.topic) || toggleChart(sel.topic), setView("explorer"))}>Open in trends</button>
-                    <button onClick={() => setDraft(`What has ${sel.topic} been doing over the last hour?`)}>
-                      <MessageSquare size={12} /> Ask about this
-                    </button>
-                  </div>
-                </div>
-              )}
+              <div className="graph-main">
+                {graphLayout === "network" ? (
+                  <TopicGraph live={live} selected={cardSet} onSelect={openCard} />
+                ) : (
+                  <TopicTree live={live} selected={cardSet} onSelect={openCard} />
+                )}
+              </div>
+              <TrendCards
+                live={live}
+                topics={cards}
+                onClose={(t) => setCards((cs) => cs.filter((c) => c !== t))}
+                onClear={() => setCards([])}
+                onOpenTrends={(ts) => (setChartTopics((cur) => [...new Set([...cur, ...ts])].slice(-6)), setView("explorer"))}
+                onAsk={setDraft}
+              />
             </div>
           ) : (
             <Explorer live={live} chartTopics={chartTopics} onToggle={toggleChart} />
