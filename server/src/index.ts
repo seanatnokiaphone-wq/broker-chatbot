@@ -22,13 +22,15 @@ app.use(express.json());
 const topicRow = (t: TopicInfo) => ({
   topic: t.topic, value: t.lastValue, payload: t.lastPayload.slice(0, 300), unit: t.unit,
   lastTs: t.lastTs, rate: Math.round(t.rate * 10) / 10, count: t.count,
+  ...(t.doc ? { doc: true } : t.source ? { source: t.source } : {}),
 });
 
 app.get("/api/status", (_req, res) => {
   res.json({
     broker: recorder.status,
     embeddedBroker: embedded ? { clients: embedded.clients() } : null,
-    topicCount: store.topics.size,
+    topicCount: [...store.topics.values()].filter((t) => !t.source).length,
+    fieldCount: [...store.topics.values()].filter((t) => t.source).length,
     messagesPerSecond: store.messagesPerSecond(),
     totalMessages: store.totalMessages,
     historyFrom: store.oldestTs(),
@@ -53,6 +55,14 @@ app.get("/api/history", (req, res) => {
   const from = req.query.from ? Number(req.query.from) : to - Number(req.query.minutes ?? 60) * 60_000;
   const points = Math.min(1000, Number(req.query.points ?? 300));
   res.json(Object.fromEntries(topics.map((t) => [t, store.history(t, from, to, points)])));
+});
+
+// State changes for text topics, for the state timeline chart.
+app.get("/api/changes", (req, res) => {
+  const topics = ([] as string[]).concat((req.query.topic as string | string[]) ?? []);
+  const to = Number(req.query.to) || Date.now();
+  const from = Number(req.query.from) || to - 60 * 60_000;
+  res.json(Object.fromEntries(topics.map((t) => [t, store.changes(t, from, to, 1000)])));
 });
 
 app.post("/api/chat", async (req, res) => {

@@ -6,12 +6,17 @@ export interface TopicRow {
   lastTs: number;
   rate: number;
   count: number;
+  /** A nested JSON document; its fields are their own topics underneath it. */
+  doc?: boolean;
+  /** For a field topic, the document it was split out of. */
+  source?: string;
 }
 
 export interface Status {
   broker: { url: string; connected: boolean; subscriptions: string[]; since: number | null; lastError?: string };
   embeddedBroker: { clients: number } | null;
   topicCount: number;
+  fieldCount: number;
   messagesPerSecond: number;
   totalMessages: number;
   historyFrom: number | null;
@@ -55,6 +60,12 @@ export async function getHistory(topics: string[], from: number, to: number, poi
   const q = new URLSearchParams({ from: String(from), to: String(to), points: String(points) });
   topics.forEach((t) => q.append("topic", t));
   return (await fetch(`/api/history?${q}`)).json();
+}
+
+export async function getChanges(topics: string[], from: number, to: number): Promise<Record<string, { ts: number; payload: string }[]>> {
+  const q = new URLSearchParams({ from: String(from), to: String(to) });
+  topics.forEach((t) => q.append("topic", t));
+  return (await fetch(`/api/changes?${q}`)).json();
 }
 
 /** Streams the assistant's reply as server-sent events. */
@@ -106,7 +117,23 @@ export function textValue(row: TopicRow): string | null {
   }
 }
 
-const BAD = /^(down|tripped|fault|alarm|error|stopped)$/i;
+const BAD = /^(down|tripped|fault|alarm|error|stopped|warning)$/i;
+export const isBadText = (s: string) => BAD.test(s);
+
+/** Text of a state payload: the JSON value, or the raw text. */
+export function stateText(payload: string): string {
+  try {
+    const v = JSON.parse(payload);
+    if (v && typeof v === "object" && "value" in v) return String(v.value);
+  } catch {}
+  return payload;
+}
+
+/** Topics drawn as nodes: JSON documents are left out, since their fields hang underneath them. */
+export const graphTopics = (topics: Map<string, TopicRow>) => [...topics.values()].filter((r) => !r.doc).map((r) => r.topic);
+export const docTopics = (topics: Map<string, TopicRow>) => [...topics.values()].filter((r) => r.doc).map((r) => r.topic);
+/** The JSON document a path is inside of (or is), if any. */
+export const docOf = (docs: string[], id: string) => docs.find((d) => id === d || id.startsWith(d + "/"));
 /** True for state/alarm topics that report a problem. */
 export function isAlarm(row: TopicRow): boolean {
   const t = textValue(row);

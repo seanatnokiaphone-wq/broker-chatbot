@@ -6,3 +6,5 @@ export const STATUS = { good: "#0ca30c", warning: "#fab219", serious: "#ec835a",
 /** ISA-95 hierarchy level colours for the topic graph: enterprise → site → area → line → cell → tag. */
 export const LEVELS = ["#f0efec", "#9085e9", "#3987e5", "#199e70", "#c98500", "#898781"];
 export const LEVEL_NAMES = ["Enterprise", "Site", "Area", "Line / unit", "Cell", "Tag"];
+/** Branches inside a nested JSON document. */
+export const JSON_COLOR = "#d55181";

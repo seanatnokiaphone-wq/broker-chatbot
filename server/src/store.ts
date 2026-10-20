@@ -15,6 +15,10 @@ export interface TopicInfo {
   /** Messages per minute, smoothed. */
   rate: number;
   retained: boolean;
+  /** Set on a JSON document topic whose fields are split out as their own topics. */
+  doc?: boolean;
+  /** Set on a field topic: the document topic it was split out of. */
+  source?: string;
 }
 
 export interface Parsed {
@@ -53,6 +57,41 @@ function stateKey(raw: string): string {
   } catch {
     return raw;
   }
+}
+
+const VALUE_KEYS = ["value", "Value", "v", "val"];
+const SKIP_KEYS = new Set(["timestamp", "ts", "time", "Timestamp"]);
+const MAX_FIELDS = 64;
+
+/**
+ * Splits a nested JSON document into one entry per leaf, keyed by its path ("drum/pressure", "axes/0/temp").
+ * Numbers and booleans keep their JSON text; strings are stored as plain text; an inner {value, unit} object
+ * stays whole so its unit is kept. Returns null for non-objects and for the usual {value, unit, ...} envelope,
+ * which is recorded as a single topic.
+ */
+export function flattenJson(raw: string): [string, string][] | null {
+  const s = raw.trim();
+  if (s[0] !== "{") return null;
+  let o: unknown;
+  try {
+    o = JSON.parse(s);
+  } catch {
+    return null;
+  }
+  if (!o || typeof o !== "object" || Array.isArray(o) || VALUE_KEYS.some((k) => k in o)) return null;
+  const out: [string, string][] = [];
+  const walk = (v: unknown, path: string[], depth: number) => {
+    if (out.length >= MAX_FIELDS || v == null) return;
+    if (typeof v === "string") out.push([path.join("/"), v]);
+    else if (typeof v === "number" || typeof v === "boolean") out.push([path.join("/"), String(v)]);
+    else if (typeof v === "object" && depth < 8) {
+      const isValueObj = !Array.isArray(v) && VALUE_KEYS.some((k) => k in v && typeof (v as Record<string, unknown>)[k] !== "object");
+      if (isValueObj) out.push([path.join("/"), JSON.stringify(v)]);
+      else for (const [k, child] of Object.entries(v)) if (!(depth === 0 && SKIP_KEYS.has(k))) walk(child, [...path, k.replaceAll("/", "_")], depth + 1);
+    }
+  };
+  walk(o, [], 0);
+  return out.length ? out : null;
 }
 
 /**
@@ -103,11 +142,37 @@ export class Store {
         lastTs: r.ts, firstTs: r.first, count: r.n, rate: 0, retained: false,
       });
     }
+    // Restore which topics are documents and which are fields split out of them.
+    for (const info of [...this.topics.values()]) {
+      const fields = flattenJson(info.lastPayload);
+      if (!fields) continue;
+      info.doc = true;
+      for (const [path] of fields) {
+        const f = this.topics.get(`${info.topic}/${path}`);
+        if (f) f.source = info.topic;
+      }
+    }
   }
 
   record(topic: string, payload: Buffer, retained = false) {
     const ts = Date.now();
-    const text = payload.toString("utf8").slice(0, MAX_PAYLOAD);
+    const raw = payload.toString("utf8");
+    const fields = flattenJson(raw);
+    this.recordOne(topic, raw.slice(0, MAX_PAYLOAD), ts, retained);
+    if (fields) {
+      this.topics.get(topic)!.doc = true;
+      for (const [path, text] of fields) {
+        const id = `${topic}/${path}`;
+        const existing = this.topics.get(id);
+        if (existing && !existing.source) continue; // a real topic already lives there
+        this.recordOne(id, text.slice(0, MAX_PAYLOAD), ts, retained, topic);
+      }
+    }
+    this.bucketCount++;
+    this.totalMessages++;
+  }
+
+  private recordOne(topic: string, text: string, ts: number, retained: boolean, source?: string) {
     const p = parsePayload(text);
     const info = this.topics.get(topic);
     if (info) {
@@ -115,12 +180,10 @@ export class Store {
       if (p.unit) info.unit = p.unit;
       if (p.quality) info.quality = p.quality;
     } else {
-      this.topics.set(topic, { topic, lastPayload: text, lastValue: p.value, unit: p.unit, quality: p.quality, lastTs: ts, firstTs: ts, count: 1, rate: 0, retained });
+      this.topics.set(topic, { topic, lastPayload: text, lastValue: p.value, unit: p.unit, quality: p.quality, lastTs: ts, firstTs: ts, count: 1, rate: 0, retained, source });
     }
     this.sinceTick.set(topic, (this.sinceTick.get(topic) ?? 0) + 1);
     this.pending.push([ts, topic, p.value, text]);
-    this.bucketCount++;
-    this.totalMessages++;
   }
 
   private flush() {

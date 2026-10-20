@@ -34,6 +34,7 @@ const summary = (t: TopicInfo) => ({
   unit: t.unit,
   ageSeconds: Math.round((Date.now() - t.lastTs) / 1000),
   msgsPerMin: r(t.rate, 1),
+  ...(t.doc ? { kind: "json document" } : t.source ? { fieldOf: t.source } : {}),
 });
 
 export interface ChartRequest {
@@ -78,7 +79,9 @@ const definitions = [
         connected: recorder.connected,
         subscriptions: recorder.subscriptions,
         now: iso(Date.now()),
-        topicCount: topics.length,
+        topicCount: topics.filter((t) => !t.source).length,
+        jsonDocuments: topics.filter((t) => t.doc).map((t) => t.topic),
+        jsonFieldTopics: topics.filter((t) => t.source).length,
         messagesPerSecond: r(store.messagesPerSecond(), 1),
         historyFrom: iso(store.oldestTs()),
         retentionMinutes: config.retentionMinutes,

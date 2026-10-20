@@ -12,8 +12,11 @@ export interface Tag {
   /** Publish period in seconds. */
   every: number;
   retain?: boolean;
-  read: (t: number) => number | string;
+  /** A number or string is wrapped as {value, unit, quality, timestamp}; an object is published as a nested JSON document. */
+  read: (t: number) => number | string | JsonDoc;
 }
+
+export type JsonDoc = { [key: string]: string | number | boolean | JsonDoc | JsonDoc[] };
 
 const ENTERPRISE = "acme";
 const SITE = "dublin";
@@ -23,6 +26,11 @@ const rand = (a: number, b: number) => a + Math.random() * (b - a);
 const noise = (n: number) => (Math.random() - 0.5) * 2 * n;
 const round = (v: number, dp = 2) => Math.round(v * 10 ** dp) / 10 ** dp;
 const wave = (t: number, period: number, phase = 0) => Math.sin((2 * Math.PI * t) / period + phase);
+
+const shiftOf = () => {
+  const h = new Date().getHours();
+  return h >= 6 && h < 14 ? "A" : h >= 14 && h < 22 ? "B" : "C";
+};
 
 /** First-order lag toward a target, so values move smoothly. */
 class Lag {
@@ -50,6 +58,8 @@ export class Plant {
     this.site();
     this.packagingLine("line1", 120, 0);
     this.packagingLine("line2", 100, 1.3);
+    this.packagingLine("line3", 150, 2.4);
+    this.packagingLine("line4", 90, 3.7);
     this.mixer("mixer1", 0);
     this.mixer("mixer2", 2.1);
     this.oven();
@@ -77,6 +87,8 @@ export class Plant {
         ["Oven zone 2 temperature overshoot", "processing/oven1/zone2"],
         ["Mixer 1 high motor current", "processing/mixer1/motor_current"],
         ["Capper torque drift on line 2", "packaging/line2/capper/torque"],
+        ["Line 3 filler motor overheating", "packaging/line3/filler/motor_temp"],
+        ["Line 4 jam at labeler", "packaging/line4/state"],
       ];
       const [name, key] = pool[Math.floor(Math.random() * pool.length)];
       const until = now + rand(120, 300) * 1000;
@@ -87,10 +99,7 @@ export class Plant {
   }
 
   private site() {
-    this.add("shift", () => {
-      const h = new Date().getHours();
-      return h >= 6 && h < 14 ? "A" : h >= 14 && h < 22 ? "B" : "C";
-    }, undefined, 30, true);
+    this.add("shift", () => shiftOf(), undefined, 30, true);
     this.add("headcount", () => 42 + Math.round(noise(3)), "people", 60, true);
     this.add("environment/ambient_temp", (t) => round(18 + 3 * wave(t, 3600) + noise(0.2)), "°C", 10);
     this.add("environment/humidity", (t) => round(55 + 8 * wave(t, 5400, 1) + noise(0.5)), "%RH", 10);
@@ -183,9 +192,52 @@ export class Plant {
     this.add(`${base}/palletizer/pallet_count`, s(() => Math.floor(good / 1200)), "pallets", 5);
     this.add(`${base}/palletizer/layer`, s(() => Math.floor((good % 1200) / 150) + 1), undefined, 5);
     this.add(`${base}/palletizer/motor_temp`, motorTemp("palletizer", 42), "°C", 2);
+
+    // Nested JSON: the MES work order running on the line.
+    const products = {
+      line1: [{ sku: "CL-330", name: "Cola 330ml can" }, { sku: "CL-500", name: "Cola 500ml PET" }],
+      line2: [{ sku: "LM-330", name: "Lemon 330ml can" }, { sku: "OR-1L", name: "Orange 1L PET" }],
+      line3: [{ sku: "WT-500", name: "Still water 500ml PET" }, { sku: "SP-500", name: "Sparkling water 500ml PET" }],
+      line4: [{ sku: "EN-250", name: "Energy 250ml can" }, { sku: "IT-330", name: "Iced tea 330ml glass" }],
+    }[line] ?? [{ sku: "GEN-330", name: "Generic 330ml" }];
+    let wo = 24100 + Math.floor(rand(0, 50)), woStart = 0, target = 24000, product = products[0], lastState: LineState = state;
+    this.add(`${base}/mes/work_order`, s(() => {
+      if (!woStart) woStart = good;
+      if (lastState === "Changeover" && state !== "Changeover") {
+        wo++;
+        woStart = good;
+        target = [12000, 24000, 36000][Math.floor(Math.random() * 3)];
+        product = products[(products.indexOf(product) + 1) % products.length];
+      }
+      lastState = state;
+      const produced = Math.round(good - woStart);
+      return {
+        order: { id: `WO-${wo}`, status: state === "Changeover" ? "Changeover" : produced >= target ? "Complete" : "In Progress" },
+        product: { ...product, batch_size: target },
+        progress: { produced, remaining: Math.max(0, target - produced), percent: round(Math.min(100, (produced / target) * 100), 1) },
+        operator: { name: ({ line1: "A. Byrne", line2: "C. Murphy", line3: "D. O'Neill", line4: "R. Quinn" } as Record<string, string>)[line] ?? "Unassigned", shift: shiftOf() },
+        line_state: state,
+      };
+    }), undefined, 5, true);
+
+    if (line === "line2") {
+      // Nested JSON: the palletizer robot's controller snapshot, three levels deep.
+      const axisTemp = [new Lag(38), new Lag(41), new Lag(36)];
+      this.add(`${base}/palletizer/robot`, s((t) => ({
+        controller: { mode: state === "Running" ? "Auto" : "Manual", program: "P-LAYER-6", cycle_time_s: round(state === "Running" ? 8.4 + noise(0.3) : 0, 2) },
+        axes: {
+          a1: { temp: { value: round(axisTemp[0].step(38 + 4 * runningFactor() + wave(t, 300)) + noise(0.2), 1), unit: "°C" }, torque_pct: round(45 * runningFactor() + noise(2), 1) },
+          a2: { temp: { value: round(axisTemp[1].step(41 + 5 * runningFactor() + wave(t, 360)) + noise(0.2), 1), unit: "°C" }, torque_pct: round(62 * runningFactor() + noise(2), 1) },
+          a3: { temp: { value: round(axisTemp[2].step(36 + 3 * runningFactor() + wave(t, 420)) + noise(0.2), 1), unit: "°C" }, torque_pct: round(30 * runningFactor() + noise(2), 1) },
+        },
+        gripper: { state: state === "Running" ? (t % 8 < 4 ? "Holding" : "Open") : "Open", vacuum_kpa: round(state === "Running" && t % 8 < 4 ? -62 + noise(1.5) : -2 + noise(0.5), 1) },
+        safety: { fence_closed: state !== "Down" || !alarm.text.includes("Guard"), estop: false },
+      })), undefined, 2);
+    }
   }
 
   private mixer(name: string, phase: number) {
+    const recipes = { mixer1: "Syrup base v3", mixer2: "Citrus concentrate v7" } as Record<string, string>;
     const base = `processing/${name}`;
     const phases = ["Charging", "Mixing", "Heating", "Holding", "Discharging", "CIP"];
     const durations = [180, 420, 300, 240, 180, 240];
@@ -221,6 +273,19 @@ export class Plant {
       const target = p === "Heating" || p === "Holding" ? 72 : p === "CIP" ? 60 : 25;
       return round(temp.step(target) + noise(0.2), 1);
     }, "°C", 2);
+
+    // Nested JSON: the batch record from the batch engine, with setpoints next to actuals.
+    this.add(`${base}/batch/record`, () => {
+      const p = current();
+      const spTemp = p === "Heating" || p === "Holding" ? 72 : p === "CIP" ? 60 : 25;
+      return {
+        batch: { id: `B-${batch}`, recipe: recipes[name] ?? "Base", phase: p, step: phases.indexOf(p) + 1, of_steps: phases.length },
+        setpoints: { temperature: { value: spTemp, unit: "°C" }, speed: { value: rpm(), unit: "rpm" } },
+        actuals: { temperature: { value: round(temp.v, 1), unit: "°C" }, speed: { value: round(rpm() + noise(2), 0), unit: "rpm" }, level: { value: round(level.v, 1), unit: "%" } },
+        quality: { brix: round(p === "Holding" || p === "Discharging" ? 11.2 + noise(0.15) : 0, 2), ph: round(3.2 + noise(0.05), 2), sample_status: p === "Holding" ? "Pending lab" : p === "Discharging" ? "Released" : "Not sampled" },
+        operator: name === "mixer1" ? "M. Walsh" : "S. Kelly",
+      };
+    }, undefined, 5);
   }
 
   private oven() {
@@ -273,6 +338,16 @@ export class Plant {
     this.add(`${base}/boiler/steam_pressure`, (t) => round(10 + 0.3 * wave(t, 180) + noise(0.05), 2), "bar", 2);
     this.add(`${base}/boiler/water_level`, (t) => round(50 + 6 * wave(t, 240) + noise(0.5), 1), "%", 2);
     this.add(`${base}/boiler/flue_temp`, (t) => round(190 + 6 * wave(t, 600) + noise(0.8), 1), "°C", 5);
+    // Nested JSON: boiler diagnostics. Health goes to Warning when the compressed-air trip starves the burner controls.
+    this.add(`${base}/boiler/diagnostics`, (t) => {
+      const warn = !!this.fault(`${base}/compressed_air/compressor2`);
+      return {
+        health: { status: warn ? "Warning" : "OK", score: round(warn ? 71 + noise(2) : 94 + noise(1), 1), message: warn ? "Low instrument air pressure at burner actuator" : "" },
+        burner: { flame: "On", firing_rate_pct: round(62 + 8 * wave(t, 180) + noise(1), 1), fuel: { flow: { value: round(41 + 3 * wave(t, 180) + noise(0.4), 1), unit: "m³/h" }, type: "Natural gas" } },
+        drum: { pressure: { value: round(10 + 0.3 * wave(t, 180) + noise(0.05), 2), unit: "bar" }, level: { value: round(50 + 6 * wave(t, 240) + noise(0.5), 1), unit: "%" } },
+        maintenance: { last_service: "2026-08-14", next_service: "2026-11-14", run_hours: Math.round(4120 + t / 3600) },
+      };
+    }, undefined, 5);
 
     this.add(`${base}/power/main/active_power`, () => round(loadKw() + noise(8), 1), "kW", 2);
     this.add(`${base}/power/main/energy`, () => round((kwh += loadKw() / 1800), 1), "kWh", 10);

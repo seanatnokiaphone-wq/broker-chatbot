@@ -102,6 +102,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .seg button { background: none; border: none; padding: 5px 12px; color: var(--muted); font-size: 12px; }
 .seg button[aria-pressed="true"] { background: var(--raised); color: var(--ink); }
 .empty { color: var(--muted); padding: 60px 0; text-align: center; }
+.state-timeline { display: flex; flex-direction: column; gap: 12px; padding: 10px 4px; }
+.st-row { display: flex; flex-direction: column; gap: 4px; }
+.st-label { color: var(--ink-2); }
+.st-track { position: relative; height: 22px; background: var(--panel-2, #1d2125); border-radius: 4px; overflow: hidden; }
+.st-seg { position: absolute; top: 0; bottom: 0; border-right: 1px solid var(--page); }
+.st-empty { position: absolute; inset: 0; display: grid; place-items: center; }
+.st-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--ink-2); }
+.st-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.st-legend i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.st-axis { display: flex; justify-content: space-between; }
 
 /* Charts */
 .chart { position: relative; }
@@ -213,7 +223,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
           </div>
           <div class="chart-col">
             <div class="toolbar">
-              <span class="muted small" id="pick-note">Click numeric topics to chart them</span>
+              <span class="muted small" id="pick-note">Click topics to chart them</span>
               <div class="seg" id="range">
                 <button data-min="15" aria-pressed="false">15 min</button>
                 <button data-min="60" aria-pressed="true">1 h</button>
@@ -261,6 +271,8 @@ const FAULTS = [
   ["Oven zone 2 temperature overshoot", "processing/oven1/zone2"],
   ["Mixer 1 high motor current", "processing/mixer1/motor_current"],
   ["Capper torque drift (line 2), rejects rising", "packaging/line2/capper/torque"],
+  ["Filler motor overheating (line 3)", "packaging/line3/filler/motor_temp"],
+  ["Labeler web break, line 4 down", "packaging/line4/state"],
 ];
 
 class Plant {
@@ -274,6 +286,8 @@ class Plant {
     this.site();
     this.packaging("line1", 120, 0);
     this.packaging("line2", 100, 1.3);
+    this.packaging("line3", 150, 2.4);
+    this.packaging("line4", 90, 3.7);
     this.mixer("mixer1", 0);
     this.mixer("mixer2", 2.1);
     this.oven();
@@ -361,6 +375,49 @@ class Plant {
     this.add(`${base}/palletizer/pallet_count`, () => Math.floor(s.good / 1200), "pallets", 5);
     this.add(`${base}/palletizer/layer`, () => Math.floor((s.good % 1200) / 150) + 1, undefined, 5);
     this.add(`${base}/palletizer/motor_temp`, mt("palletizer"), "°C", 2);
+
+    // Nested JSON: the MES work order running on the line.
+    const products = {
+      line1: [["CL-330", "Cola 330ml can"], ["CL-500", "Cola 500ml PET"]],
+      line2: [["LM-330", "Lemon 330ml can"], ["OR-1L", "Orange 1L PET"]],
+      line3: [["WT-500", "Still water 500ml PET"], ["SP-500", "Sparkling water 500ml PET"]],
+      line4: [["EN-250", "Energy 250ml can"], ["IT-330", "Iced tea 330ml glass"]],
+    }[line];
+    const operator = { line1: "A. Byrne", line2: "C. Murphy", line3: "D. O'Neill", line4: "R. Quinn" }[line];
+    const wo = { id: 24100 + Math.floor(rand(0, 50)), start: s.good - rand(2000, 9000), target: 24000, product: 0, last: s.state };
+    this.updaters.push(() => {
+      if (wo.last === "Changeover" && s.state !== "Changeover") {
+        wo.id++; wo.start = s.good; wo.target = [12000, 24000, 36000][Math.floor(Math.random() * 3)]; wo.product = (wo.product + 1) % products.length;
+      }
+      wo.last = s.state;
+    });
+    this.add(`${base}/mes/work_order`, (n) => {
+      const produced = Math.round(s.good - wo.start);
+      const h = new Date(n).getHours();
+      return {
+        order: { id: `WO-${wo.id}`, status: s.state === "Changeover" ? "Changeover" : produced >= wo.target ? "Complete" : "In Progress" },
+        product: { sku: products[wo.product][0], name: products[wo.product][1], batch_size: wo.target },
+        progress: { produced, remaining: Math.max(0, wo.target - produced), percent: round(Math.min(100, (produced / wo.target) * 100), 1) },
+        operator: { name: operator, shift: h >= 6 && h < 14 ? "A" : h >= 14 && h < 22 ? "B" : "C" },
+        line_state: s.state,
+      };
+    }, undefined, 5, true);
+
+    if (line === "line2") {
+      // Nested JSON: the palletizer robot's controller snapshot, three levels deep.
+      const ax = [new Lag(38, 0.05), new Lag(41, 0.05), new Lag(36, 0.05)];
+      this.updaters.push((now, dt) => { const rf = run() ? 1 : 0; ax[0].step(38 + 4 * rf, dt); ax[1].step(41 + 5 * rf, dt); ax[2].step(36 + 3 * rf, dt); });
+      this.add(`${base}/palletizer/robot`, (n) => {
+        const holding = run() && Math.floor(n / 1000) % 8 < 4;
+        const axis = (i, torque) => ({ temp: { value: round(ax[i].v + wave(n, 300 + 60 * i) + noise(0.2), 1), unit: "°C" }, torque_pct: round(torque * (run() ? 1 : 0.1) + noise(2), 1) });
+        return {
+          controller: { mode: run() ? "Auto" : "Manual", program: "P-LAYER-6", cycle_time_s: round(run() ? 8.4 + noise(0.3) : 0, 2) },
+          axes: { a1: axis(0, 45), a2: axis(1, 62), a3: axis(2, 30) },
+          gripper: { state: holding ? "Holding" : "Open", vacuum_kpa: round(holding ? -62 + noise(1.5) : -2 + noise(0.5), 1) },
+          safety: { fence_closed: !(s.state === "Down" && s.alarm.includes("Guard")), estop: false },
+        };
+      }, undefined, 2);
+    }
   }
 
   mixer(name, phase) {
@@ -390,6 +447,17 @@ class Plant {
     this.add(`${base}/motor_temp`, (n) => round(45 + rpm(at(n).phase) * 0.05 + 2 * wave(n, 700, phase) + noise(0.3), 1), "°C", 2);
     this.add(`${base}/tank_level`, () => round(level.v + noise(0.3), 1), "%", 2);
     this.add(`${base}/product_temp`, () => round(temp.v + noise(0.2), 1), "°C", 2);
+    // Nested JSON: the batch record from the batch engine, with setpoints next to actuals.
+    this.add(`${base}/batch/record`, (n) => {
+      const { phase: p, batch } = at(n);
+      return {
+        batch: { id: `B-${batch}`, recipe: name === "mixer1" ? "Syrup base v3" : "Citrus concentrate v7", phase: p, step: phases.indexOf(p) + 1, of_steps: phases.length },
+        setpoints: { temperature: { value: p === "Heating" || p === "Holding" ? 72 : p === "CIP" ? 60 : 25, unit: "°C" }, speed: { value: rpm(p), unit: "rpm" } },
+        actuals: { temperature: { value: round(temp.v, 1), unit: "°C" }, speed: { value: round(rpm(p) + noise(2), 0), unit: "rpm" }, level: { value: round(level.v, 1), unit: "%" } },
+        quality: { brix: round(p === "Holding" || p === "Discharging" ? 11.2 + noise(0.15) : 0, 2), ph: round(3.2 + noise(0.05), 2), sample_status: p === "Holding" ? "Pending lab" : p === "Discharging" ? "Released" : "Not sampled" },
+        operator: name === "mixer1" ? "M. Walsh" : "S. Kelly",
+      };
+    }, undefined, 5);
   }
 
   oven() {
@@ -438,6 +506,16 @@ class Plant {
     this.add(`${base}/boiler/steam_pressure`, (n) => round(10 + 0.3 * wave(n, 180) + noise(0.05), 2), "bar", 2);
     this.add(`${base}/boiler/water_level`, (n) => round(50 + 6 * wave(n, 240) + noise(0.5), 1), "%", 2);
     this.add(`${base}/boiler/flue_temp`, (n) => round(190 + 6 * wave(n, 600) + noise(0.8), 1), "°C", 5);
+    // Nested JSON: boiler diagnostics. Health drops to Warning while compressor 2 is tripped (low instrument air).
+    this.add(`${base}/boiler/diagnostics`, (n) => {
+      const warn = !!this.fault(`${base}/compressed_air/compressor2`);
+      return {
+        health: { status: warn ? "Warning" : "OK", score: round(warn ? 71 + noise(2) : 94 + noise(1), 1), message: warn ? "Low instrument air pressure at burner actuator" : "" },
+        burner: { flame: "On", firing_rate_pct: round(62 + 8 * wave(n, 180) + noise(1), 1), fuel: { flow: { value: round(41 + 3 * wave(n, 180) + noise(0.4), 1), unit: "m³/h" }, type: "Natural gas" } },
+        drum: { pressure: { value: round(10 + 0.3 * wave(n, 180) + noise(0.05), 2), unit: "bar" }, level: { value: round(50 + 6 * wave(n, 240) + noise(0.5), 1), unit: "%" } },
+        maintenance: { last_service: "2026-08-14", next_service: "2026-11-14", run_hours: Math.round(4120 + (n - startedAt) / 3_600_000 + 3) },
+      };
+    }, undefined, 5);
     this.add(`${base}/power/main/active_power`, () => round(load() + noise(8), 1), "kW", 2);
     this.add(`${base}/power/main/energy`, () => round(kwh, 1), "kWh", 10);
     this.add(`${base}/power/main/voltage_l1`, () => round(230 + noise(1.5), 1), "V", 5);
@@ -454,16 +532,37 @@ class Plant {
 /* ------------------------------------------------------------------ *
  * In-memory "broker" history: every published message, 3 h rolling.
  * ------------------------------------------------------------------ */
-const store = new Map(); // topic -> {topic, unit, ts: number[], v: (number|string)[], numeric}
+const store = new Map(); // topic -> {topic, unit, ts: number[], v: (number|string)[], numeric, source?}
+const docs = new Map(); // JSON document topic -> latest document; its fields live in `store` as <topic>/<path>
 const throughput = []; // {ts, count} per second
 let totalMsgs = 0;
 
-function record(topic, unit, ts, value) {
+function record(topic, unit, ts, value, source) {
   let t = store.get(topic);
-  if (!t) { t = { topic, unit, ts: [], v: [], numeric: typeof value === "number" }; store.set(topic, t); }
+  if (!t) { t = { topic, unit, ts: [], v: [], numeric: typeof value === "number", source }; store.set(topic, t); }
   t.ts.push(ts); t.v.push(value);
-  totalMsgs++;
+  if (!source) totalMsgs++;
 }
+/** Leaves of a nested JSON document as [path, value, unit]; an inner {value, unit} object counts as one leaf. */
+function flatten(o, path = [], out = []) {
+  for (const [k, v] of Object.entries(o)) {
+    const p = [...path, k];
+    if (v == null) continue;
+    if (typeof v === "object" && "value" in v) out.push([p.join("/"), v.value, v.unit]);
+    else if (typeof v === "object") flatten(v, p, out);
+    else out.push([p.join("/"), typeof v === "boolean" ? String(v) : v, undefined]);
+  }
+  return out;
+}
+/** Publishes one tag: a plain value, or a JSON document that is split into field topics. Returns the topics written. */
+function emit(tag, now) {
+  const v = tag.read(now);
+  if (!v || typeof v !== "object") { record(tag.topic, tag.unit, now, v); return [tag.topic]; }
+  docs.set(tag.topic, { ...v, timestamp: new Date(now).toISOString() });
+  totalMsgs++;
+  return flatten(v).map(([path, value, unit]) => (record(`${tag.topic}/${path}`, unit, now, value, tag.topic), `${tag.topic}/${path}`));
+}
+const docOf = (id) => [...docs.keys()].find((d) => id === d || id.startsWith(d + "/"));
 const lastOf = (t) => ({ value: t.v[t.v.length - 1], ts: t.ts[t.ts.length - 1] });
 function lowerBound(arr, x) { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < x) lo = m + 1; else hi = m; } return lo; }
 function slice(t, from, to) { const a = lowerBound(t.ts, from), b = lowerBound(t.ts, to + 1); return { ts: t.ts.slice(a, b), v: t.v.slice(a, b) }; }
@@ -497,7 +596,7 @@ const isAlarm = (t) => {
   const { value } = lastOf(t);
   if (typeof value !== "string") return false;
   if (t.topic.endsWith("/alarm/active")) return value !== "none";
-  return /^(down|tripped|fault|stopped)$/i.test(value);
+  return /^(down|tripped|fault|stopped|warning)$/i.test(value);
 };
 const fmt = (t, value = lastOf(t).value) => typeof value === "number" ? `${Number.isInteger(value) ? value : value.toFixed(2)}${t.unit ? " " + t.unit : ""}` : String(value);
 
@@ -511,7 +610,7 @@ function publishAt(now, stepS, force) {
   let n = 0;
   for (const tag of plant.tags) {
     if (!force && Math.floor(sec / tag.every) === Math.floor((sec - stepS) / tag.every)) continue;
-    record(tag.topic, tag.unit, now, tag.read(now));
+    emit(tag, now);
     n++;
   }
   return n;
@@ -535,8 +634,7 @@ function liveTick() {
   let n = 0;
   for (const tag of plant.tags) {
     if (sec % tag.every !== 0) continue;
-    record(tag.topic, tag.unit, now, tag.read(now));
-    pulses.set(tag.topic, now);
+    for (const t of emit(tag, now)) pulses.set(t, now);
     n++;
   }
   throughput.push({ ts: now, count: n });
@@ -589,7 +687,8 @@ function makeTools(onCall) {
       const branches = {};
       for (const t of all) { const k = t.topic.split("/").slice(0, 4).join("/"); branches[k] = (branches[k] || 0) + 1; }
       return {
-        broker: "sim://acme-dublin (in-browser simulator)", now: iso(Date.now()), topicCount: all.length,
+        broker: "sim://acme-dublin (in-browser simulator)", now: iso(Date.now()), topicCount: all.filter((t) => !t.source).length + docs.size,
+        jsonDocuments: [...docs.keys()], jsonFieldTopics: all.filter((t) => t.source).length,
         messagesPerSecond: r3(mpsHistory.slice(-10).reduce((a, b) => a + b, 0) / Math.max(1, Math.min(10, mpsHistory.length)), 1),
         historyFrom: iso(Math.min(...all.map((t) => t.ts[0]))), alarms: all.filter(isAlarm).map(summary),
         busiest: all.sort((a, b) => ratePerMin(b) - ratePerMin(a)).slice(0, 8).map(summary), branches,
@@ -636,6 +735,11 @@ function makeTools(onCall) {
       }
       out.sort((a, b) => Math.abs(b.peakZ) - Math.abs(a.peakZ));
       return { from: iso(from), to: iso(to), count: out.length, findings: out.slice(0, 30) };
+    }),
+    tool("get_json_document", "Latest full nested JSON document for a document topic (work orders, batch records, robot and boiler diagnostics). Each field is also its own topic at <document topic>/<json path>, with history.", { type: "object", properties: { topic: { type: "string" } }, required: ["topic"] }, (i) => {
+      const d = docs.get(String(i.topic));
+      if (!d) throw new Error(`Not a JSON document topic. Documents: ${[...docs.keys()].join(", ")}`);
+      return { topic: String(i.topic), document: d };
     }),
     tool("show_chart", "Draw an interactive line chart in the user's chat for 1-6 numeric topics over a window. Use whenever a trend or comparison is clearer as a picture.", { type: "object", properties: { title: { type: "string" }, topics: { type: "array", items: { type: "string" } }, ...winProps }, required: ["title", "topics"] }, (i) => {
       const topics = (Array.isArray(i.topics) ? i.topics : []).map(String).filter((t) => store.get(t)?.numeric).slice(0, 6);
@@ -713,12 +817,32 @@ function drawChart(el, topics, from, to, height = 200) {
   }
 }
 
+/** Trend for text topics: a row of coloured state bands per topic, with time in each state. */
+function drawStates(el, topics, from, to) {
+  const dur = (ms) => (ms < 60_000 ? `${Math.round(ms / 1000)} s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)} min` : `${(ms / 3_600_000).toFixed(1)} h`);
+  const esc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const span = to - from;
+  const rows = topics.map((topic) => {
+    const t = store.get(topic), sl = slice(t, from, to);
+    const segs = [];
+    sl.v.forEach((v, k) => { if (k === 0 || v !== sl.v[k - 1]) segs.push({ state: String(v), from: sl.ts[k], to: to }); if (segs.length > 1) segs[segs.length - 2].to = segs[segs.length - 1].from; });
+    const states = [...new Set(segs.map((x) => x.state))];
+    const color = (st) => (/^(down|tripped|fault|stopped|warning)$/i.test(st) ? "var(--critical)" : SERIES[states.indexOf(st) % SERIES.length]);
+    const totals = states.map((st) => [st, segs.filter((x) => x.state === st).reduce((a, x) => a + x.to - x.from, 0)]).sort((a, b) => b[1] - a[1]);
+    return `<div class="st-row"><div class="mono small st-label">${esc(shortName(topic))}</div><div class="st-track">${segs.map((x) =>
+      `<div class="st-seg" style="left:${((x.from - from) / span) * 100}%;width:${Math.max(0.2, ((x.to - x.from) / span) * 100)}%;background:${color(x.state)}" title="${esc(x.state)} · ${timeFmt(x.from)}–${timeFmt(x.to)} (${dur(x.to - x.from)})"></div>`).join("") ||
+      `<div class="st-empty small muted">No history in this window</div>`}</div><div class="st-legend small">${totals.slice(0, 6).map(([st, ms]) => `<span><i style="background:${color(st)}"></i>${esc(st || "(empty)")} <span class="muted">${dur(ms)}</span></span>`).join("")}</div></div>`;
+  });
+  el.insertAdjacentHTML("beforeend", `<div class="state-timeline">${rows.join("")}<div class="st-axis small muted"><span>${timeFmt(from)}</span><span>${timeFmt(from + span / 2)}</span><span>${timeFmt(to)}</span></div></div>`);
+}
+
 /* ------------------------------------------------------------------ *
  * Top bar
  * ------------------------------------------------------------------ */
 const $ = (id) => document.getElementById(id);
 function renderTopbar() {
-  $("st-topics").textContent = store.size;
+  const fields = [...store.values()].filter((t) => t.source).length;
+  $("st-topics").textContent = `${store.size - fields + docs.size}${fields ? ` + ${fields} JSON fields` : ""}`;
   const mps = mpsHistory.slice(-10).reduce((a, b) => a + b, 0) / Math.max(1, Math.min(10, mpsHistory.length));
   $("st-mps").textContent = mps.toFixed(1);
   const first = Math.min(...[...store.values()].map((t) => t.ts[0]));
@@ -753,7 +877,8 @@ document.addEventListener("click", (e) => { if (!e.target.closest(".fault-wrap")
  * ------------------------------------------------------------------ */
 const LEVELS = ["#eceeef", "#9085e9", "#3987e5", "#199e70", "#c98500", "#7f878f"];
 const LEVEL_NAMES = ["Enterprise", "Site", "Area", "Line / unit", "Cell", "Tag"];
-$("legend").innerHTML = LEVEL_NAMES.map((n, i) => `<span><i style="background:${LEVELS[i]}"></i>${n}</span>`).join("") + `<span><i style="background:var(--critical)"></i>Alarm / down</span>`;
+const JSON_COLOR = "#d55181";
+$("legend").innerHTML = LEVEL_NAMES.map((n, i) => `<span><i style="background:${LEVELS[i]}"></i>${n}</span>`).join("") + `<span><i style="background:${JSON_COLOR}"></i>JSON document</span><span><i style="background:var(--critical)"></i>Alarm / down</span>`;
 const canvas = $("graph"), ctx = canvas.getContext("2d");
 let selected = null, hover = null, transform = d3.zoomIdentity, W = 800, H = 600;
 let layout = "force"; // "force" | "tree"
@@ -763,7 +888,7 @@ for (const topic of [...store.keys()].sort()) {
   parts.forEach((name, i) => {
     const id = parts.slice(0, i + 1).join("/");
     if (!byId.has(id)) {
-      const n = { id, name, depth: i, leaf: false, parent: i > 0 ? byId.get(parts.slice(0, i).join("/")) : null, kids: [] };
+      const n = { id, name, depth: i, leaf: false, json: !!docOf(id), parent: i > 0 ? byId.get(parts.slice(0, i).join("/")) : null, kids: [] };
       n.parent?.kids.push(n);
       byId.set(id, n); nodes.push(n);
       if (i > 0) links.push({ source: parts.slice(0, i).join("/"), target: id });
@@ -782,7 +907,8 @@ for (const n of nodes) { n.dx = n.x; n.dy = n.y; n.op = 1; }
 
 /* Left-to-right tree: ISA-95 levels as columns, collapsible branches. */
 const ROW = 24, COL = 165;
-const treeCollapsed = new Set(nodes.filter((n) => !n.leaf && n.depth >= 4).map((n) => n.id)); // cells start folded
+// Cells and JSON documents start folded; inside a document everything stays open, so unfolding it shows the whole structure.
+const treeCollapsed = new Set(nodes.filter((n) => !n.leaf && (n.depth >= 4 || n.json) && !n.parent?.json).map((n) => n.id));
 // Search: topic path or current value contains the text (or matches an MQTT filter with + / #).
 // In the tree, matching branches open and everything else is hidden; in the network, everything else dims.
 let treeFilter = "", keep = null;
@@ -813,7 +939,7 @@ function layoutTree() {
   for (const n of nodes) if (!placed.has(n)) { let a = hiddenIn(n); while (a && !placed.has(a)) a = hiddenIn(a) || a.parent; a = a || nodes[0]; n.tx = a.tx; n.ty = a.ty; }
 }
 layoutTree();
-const levelOf = (n) => (n.leaf ? "Tag" : ["Enterprise", "Site", "Area", "Line", "Cell"][Math.min(n.depth, 4)]);
+const levelOf = (n) => (n.leaf ? "Tag" : n.json ? "JSON" : ["Enterprise", "Site", "Area", "Line", "Cell"][Math.min(n.depth, 4)]);
 const visible = (n) => layout === "force" || !hiddenIn(n);
 
 function resizeCanvas() {
@@ -884,6 +1010,7 @@ function drawGraph() {
     n.dx += (tx - n.dx) * 0.18; n.dy += (ty - n.dy) * 0.18;
     n.op += ((visible(n) ? 1 : 0) - n.op) * 0.2;
   }
+  const hitCount = keep ? nodes.filter((n) => n.leaf && keep.has(n.id)).length : 0;
   ctx.clearRect(0, 0, W, H);
   ctx.save();
   ctx.translate(transform.x, transform.y); ctx.scale(transform.k, transform.k);
@@ -912,11 +1039,11 @@ function drawGraph() {
       ctx.lineWidth = 1.2 / transform.k + 0.3; ctx.stroke();
     }
     ctx.beginPath(); ctx.arc(n.dx, n.dy, r, 0, 2 * Math.PI);
-    ctx.fillStyle = alarm ? "#d03b3b" : LEVELS[n.leaf ? 5 : Math.min(n.depth, 4)];
+    ctx.fillStyle = alarm ? "#d03b3b" : n.leaf ? LEVELS[5] : n.json ? JSON_COLOR : LEVELS[Math.min(n.depth, 4)];
     ctx.fill();
     if (hit || n.id === selected || n.id === hover) { ctx.strokeStyle = n.id === selected || n.id === hover ? "#eceeef" : "#3b8be6"; ctx.lineWidth = 1.5 / transform.k; ctx.stroke(); }
     if (tree) drawTreeLabel(n, t, alarm, r);
-    else if ((!n.leaf && !dim) || hit || (!keep && transform.k > 2.4) || n.id === selected) {
+    else if ((!n.leaf && !dim) || (hit && (hitCount <= 20 || transform.k > 2.4)) || (!keep && transform.k > 2.4) || n.id === selected) {
       const fs = (n.leaf ? 9.5 : 12.5 - n.depth) / Math.max(transform.k, 0.6);
       ctx.font = `${n.leaf ? 400 : 600} ${fs}px "IBM Plex Sans", sans-serif`;
       ctx.textAlign = "center"; ctx.textBaseline = "top";
@@ -940,7 +1067,7 @@ function drawTreeLabel(n, t, alarm, r) {
     ctx.font = `500 10.5px "IBM Plex Sans", sans-serif`;
     const bw = ctx.measureText(badge).width + 10;
     roundRect(x, y - 8, bw, 16, 4); ctx.fillStyle = "#1d2125"; ctx.fill(); ctx.strokeStyle = "#343a41"; ctx.lineWidth = 1 / transform.k; ctx.stroke();
-    ctx.fillStyle = LEVELS[Math.min(n.depth, 4)] === "#eceeef" ? "#b9bfc5" : LEVELS[Math.min(n.depth, 4)];
+    ctx.fillStyle = n.json ? JSON_COLOR : LEVELS[Math.min(n.depth, 4)] === "#eceeef" ? "#b9bfc5" : LEVELS[Math.min(n.depth, 4)];
     ctx.fillText(badge, x + 5, y + 0.5);
     if (treeCollapsed.has(n.id) && !keep) {
       const count = nodes.filter((m) => m.leaf && m.id.startsWith(n.id + "/")).length;
@@ -998,10 +1125,10 @@ function renderDetail() {
   if (!t) return;
   el.innerHTML = `<div class="detail-head"><div class="mono small"></div><button class="icon-btn" aria-label="Close">✕</button></div>
     <div class="v ${isAlarm(t) ? "bad" : ""}"></div><div class="small muted"></div><div class="dchart"></div>
-    <div class="actions">${t.numeric ? '<button class="btn" data-a="trend">Open in trends</button>' : ""}<button class="btn" data-a="ask">Ask about this</button></div>`;
+    <div class="actions"><button class="btn" data-a="trend">Open in trends</button><button class="btn" data-a="ask">Ask about this</button></div>`;
   el.querySelector(".mono").textContent = t.topic;
   el.querySelector(".v").textContent = fmt(t);
-  el.querySelector(".small.muted").textContent = `${ratePerMin(t)} msg/min · ${t.ts.length.toLocaleString()} messages recorded`;
+  el.querySelector(".small.muted").textContent = `${ratePerMin(t)} msg/min · ${t.ts.length.toLocaleString()} messages recorded${t.source ? ` · field of JSON document ${t.source.split("/").slice(-2).join("/")}` : ""}`;
   el.querySelector(".icon-btn").onclick = () => { selected = null; renderDetail(); };
   const btns = el.querySelectorAll("[data-a]");
   btns.forEach((b) => (b.onclick = () => {
@@ -1009,11 +1136,7 @@ function renderDetail() {
     else { $("input").value = `What has ${t.topic} been doing over the last hour?`; $("input").focus(); }
   }));
   if (t.numeric) drawChart(el.querySelector(".dchart"), [t.topic], Date.now() - 30 * 60_000, Date.now(), 140);
-  else {
-    const s = slice(t, Date.now() - 60 * 60_000, Date.now());
-    const ch = []; s.v.forEach((v, k) => { if (k === 0 || v !== s.v[k - 1]) ch.push([s.ts[k], v]); });
-    el.querySelector(".dchart").innerHTML = `<div class="small muted" style="margin-top:6px">Last hour</div>` + ch.slice(-8).reverse().map(([ts, v]) => `<div class="small mono">${new Date(ts).toLocaleTimeString()} → ${String(v).replace(/</g, "&lt;")}</div>`).join("");
-  }
+  else drawStates(el.querySelector(".dchart"), [t.topic], Date.now() - 60 * 60_000, Date.now());
   detailChartAt = Date.now();
 }
 
@@ -1040,7 +1163,7 @@ function buildTree() {
       const leaf = c.children.size === 0;
       const t = store.get(c.path);
       const b = document.createElement("button");
-      b.className = `row ${leaf ? "" : "branch"} ${leaf && !t.numeric ? "text-topic" : ""}`;
+      b.className = `row ${leaf ? "" : "branch"}`;
       b.style.paddingLeft = `${8 + depth * 14}px`;
       b.dataset.path = c.path;
       b.innerHTML = leaf ? `<span class="dot"></span><span class="name"></span><span class="val"></span>` : `<span class="chev">▾</span><span class="name"></span>`;
@@ -1064,7 +1187,6 @@ function buildTree() {
       b.querySelector(".chev").textContent = collapsed.has(p) ? "▸" : "▾";
       return;
     }
-    if (!t.numeric) return;
     picked = picked.includes(p) ? picked.filter((x) => x !== p) : [...picked, p].slice(-6);
     syncTree(); renderTrend();
   };
@@ -1081,13 +1203,16 @@ function syncTree() {
       el.hidden = !!f && !path.toLowerCase().includes(f);
     } else el.hidden = !!f && ![...store.keys()].some((k) => k.startsWith(path + "/") && k.toLowerCase().includes(f));
   }
-  $("pick-note").textContent = picked.length ? `${picked.length} of 6 topics · click a topic to add or remove it` : "Click numeric topics to chart them";
+  $("pick-note").textContent = picked.length ? `${picked.length} of 6 topics · click a topic to add or remove it` : "Click topics to chart them (text topics show as state timelines)";
 }
 $("filter").oninput = syncTree;
 function renderTrend() {
   if ($("view-explorer").hidden) return;
   if (!picked.length) { $("trend").innerHTML = `<div class="empty">Pick topics from the tree to compare their history.</div>`; return; }
-  drawChart($("trend"), picked, Date.now() - minutes * 60_000, Date.now(), 260);
+  const numeric = picked.filter((t) => store.get(t)?.numeric), text = picked.filter((t) => !numeric.includes(t));
+  if (numeric.length) drawChart($("trend"), numeric, Date.now() - minutes * 60_000, Date.now(), text.length ? 200 : 260);
+  else $("trend").innerHTML = "";
+  if (text.length) drawStates($("trend"), text, Date.now() - minutes * 60_000, Date.now());
 }
 $("range").onclick = (e) => {
   const b = e.target.closest("button"); if (!b) return;
@@ -1125,7 +1250,7 @@ function instructions() {
   const topics = [...store.values()].sort((a, b) => a.topic.localeCompare(b.topic)).map((t) => `${t.topic}${t.unit ? ` [${t.unit}]` : ""}${t.numeric ? "" : " (text)"}`).join("\n");
   return `You are the assistant inside an MQTT broker dashboard. Answer questions about what is happening on the broker now and over the recorded history (up to 180 minutes), using the tools to read real data. Never invent values; if the data doesn't show something, say so.
 
-The broker is a Unified Namespace laid out to ISA-95: enterprise/site/area/line/cell/tag. It is a simulated food and beverage plant (packaging lines, mixers, an oven, CIP and utilities) running in the browser, with faults injected now and then.
+The broker is a Unified Namespace laid out to ISA-95: enterprise/site/area/line/cell/tag. It is a simulated food and beverage plant (packaging lines, mixers, an oven, CIP and utilities) running in the browser, with faults injected now and then. Some topics carry nested JSON documents (MES work orders per line, mixer batch records, a palletizer robot, boiler diagnostics). Each document is split into field topics at <document topic>/<json path>, e.g. acme/dublin/utilities/boiler/diagnostics/drum/pressure, each with its own history: numeric fields work with get_history and get_stats, text fields with get_state_changes, and get_json_document returns a whole document.
 
 How to work:
 - Prefer get_stats and find_anomalies for broad questions, get_history for one signal, get_state_changes for states, alarms and batch phases. Use exact topic names from the list below.

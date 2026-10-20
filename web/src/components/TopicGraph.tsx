@@ -1,8 +1,8 @@
 import { Search, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D, { type ForceGraphMethods, type NodeObject } from "react-force-graph-2d";
-import { isAlarm, type TopicRow } from "../api";
-import { LEVELS, LEVEL_NAMES, STATUS } from "../colors";
+import { docOf, docTopics, graphTopics, isAlarm, type TopicRow } from "../api";
+import { JSON_COLOR, LEVELS, LEVEL_NAMES, STATUS } from "../colors";
 import { topicMatcher } from "../filter";
 import type { Live } from "../useLive";
 
@@ -12,6 +12,8 @@ interface GNode {
   depth: number;
   leaf: boolean;
   children: number;
+  /** Inside a nested JSON document. */
+  json: boolean;
 }
 interface GLink {
   source: string;
@@ -40,8 +42,10 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
   }, []);
 
   // Only rebuild the graph when the set of topics changes, so the layout stays put.
-  const topicKey = [...live.topics.keys()].sort().join("\n");
+  const topicKey = graphTopics(live.topics).sort().join("\n");
+  const docKey = docTopics(live.topics).sort().join("\n");
   const data = useMemo(() => {
+    const docs = docKey ? docKey.split("\n") : [];
     const nodes = new Map<string, GNode>();
     const links: GLink[] = [];
     for (const topic of topicKey ? topicKey.split("\n") : []) {
@@ -49,7 +53,7 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
       parts.forEach((name, i) => {
         const id = parts.slice(0, i + 1).join("/");
         if (!nodes.has(id)) {
-          nodes.set(id, { id, name, depth: i, leaf: false, children: 0 });
+          nodes.set(id, { id, name, depth: i, leaf: false, children: 0, json: !!docOf(docs, id) });
           if (i > 0) {
             const parent = parts.slice(0, i).join("/");
             links.push({ source: parent, target: id });
@@ -60,7 +64,7 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
       nodes.get(topic)!.leaf = true;
     }
     return { nodes: [...nodes.values()], links };
-  }, [topicKey]);
+  }, [topicKey, docKey]);
 
   useEffect(() => {
     fg.current?.d3Force("charge")?.strength(-40);
@@ -121,7 +125,7 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
           ctx.globalAlpha = dim ? 0.12 : 1;
           const alarm = row ? isAlarm(row) : false;
           const r = n.leaf ? 2.2 + Math.min(3, (row?.rate ?? 0) / 25) : 7 - Math.min(n.depth, 4);
-          const color = alarm ? STATUS.critical : LEVELS[Math.min(n.depth, LEVELS.length - 1)];
+          const color = alarm ? STATUS.critical : n.leaf ? LEVELS[5] : n.json ? JSON_COLOR : LEVELS[Math.min(n.depth, 4)];
           const pulse = live.pulses.get(n.id as string);
           const age = pulse ? Date.now() - pulse : Infinity;
           if (n.leaf && age < 1200) {
@@ -140,7 +144,7 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
             ctx.lineWidth = 1.5 / scale;
             ctx.stroke();
           }
-          const showLabel = (!n.leaf && !dim) || hit || (!hits && scale > 2.2) || n.id === selected;
+          const showLabel = (!n.leaf && !dim) || (hit && (hits!.tags.size <= 20 || scale > 2.2)) || (!hits && scale > 2.2) || n.id === selected;
           if (showLabel) {
             const fontSize = Math.max(n.leaf ? 2.5 : 3.5, (n.leaf ? 10 : 12 - n.depth) / scale);
             ctx.font = `${n.leaf ? 400 : 600} ${fontSize}px Inter, sans-serif`;
@@ -182,6 +186,10 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
             {name}
           </span>
         ))}
+        <span>
+          <i style={{ background: JSON_COLOR }} />
+          JSON document
+        </span>
         <span>
           <i style={{ background: STATUS.critical }} />
           Alarm / down

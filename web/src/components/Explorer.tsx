@@ -4,6 +4,7 @@ import { display, isAlarm, type TopicRow } from "../api";
 import { SERIES } from "../colors";
 import type { Live } from "../useLive";
 import { HistoryChart } from "./HistoryChart";
+import { StateTimeline } from "./StateTimeline";
 
 interface TreeNode {
   name: string;
@@ -34,6 +35,7 @@ export function Explorer({ live, chartTopics, onToggle }: Props) {
     const root: TreeNode = { name: "", path: "", children: new Map() };
     const f = filter.toLowerCase();
     for (const row of live.topics.values()) {
+      if (row.doc) continue; // its fields are listed underneath it instead
       if (f && !row.topic.toLowerCase().includes(f)) continue;
       let node = root;
       row.topic.split("/").forEach((name, i, parts) => {
@@ -46,7 +48,9 @@ export function Explorer({ live, chartTopics, onToggle }: Props) {
     return root;
   }, [live.version, filter]);
 
-  const units = Object.fromEntries(chartTopics.map((t) => [t, live.topics.get(t)?.unit]));
+  const numeric = chartTopics.filter((t) => live.topics.get(t)?.value != null);
+  const text = chartTopics.filter((t) => !numeric.includes(t));
+  const units = Object.fromEntries(numeric.map((t) => [t, live.topics.get(t)?.unit]));
   const now = Date.now();
 
   const toggleCollapse = (path: string) =>
@@ -68,8 +72,8 @@ export function Explorer({ live, chartTopics, onToggle }: Props) {
             <div
               className={`tree-row ${idx >= 0 ? "picked" : ""} ${child.row && isAlarm(child.row) ? "alarm" : ""}`}
               style={{ paddingLeft: 8 + depth * 14 }}
-              onClick={() => (leaf ? child.row?.value != null && onToggle(child.path) : toggleCollapse(child.path))}
-              title={leaf && child.row?.value == null ? "Text topic: ask the chat about its history" : undefined}
+              onClick={() => (leaf ? onToggle(child.path) : toggleCollapse(child.path))}
+              title={leaf && child.row?.value == null ? "Text topic: charted as a state timeline" : undefined}
             >
               {leaf ? <span className="dot" style={{ background: idx >= 0 ? SERIES[idx % SERIES.length] : "transparent" }} /> : open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
               <span className={leaf ? "" : "branch"}>{child.name}</span>
@@ -91,7 +95,7 @@ export function Explorer({ live, chartTopics, onToggle }: Props) {
       </div>
       <div className="explorer-chart">
         <div className="toolbar">
-          <span className="muted small">{chartTopics.length ? `${chartTopics.length} of 6 topics` : "Click numeric topics to chart them"}</span>
+          <span className="muted small">{chartTopics.length ? `${chartTopics.length} of 6 topics` : "Click topics to chart them (text topics show as state timelines)"}</span>
           <div className="segmented">
             {RANGES.map((r) => (
               <button key={r.minutes} className={minutes === r.minutes ? "on" : ""} onClick={() => setMinutes(r.minutes)}>
@@ -101,7 +105,10 @@ export function Explorer({ live, chartTopics, onToggle }: Props) {
           </div>
         </div>
         {chartTopics.length ? (
-          <HistoryChart topics={chartTopics} from={now - minutes * 60_000} to={now} units={units} live height={420} />
+          <>
+            {numeric.length > 0 && <HistoryChart topics={numeric} from={now - minutes * 60_000} to={now} units={units} live height={text.length ? 300 : 420} />}
+            {text.length > 0 && <StateTimeline topics={text} from={now - minutes * 60_000} to={now} live />}
+          </>
         ) : (
           <div className="empty">Pick topics from the tree to compare their history.</div>
         )}

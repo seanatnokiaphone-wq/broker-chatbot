@@ -6,6 +6,7 @@ import { SERIES, STATUS } from "./colors";
 import { Chat } from "./components/Chat";
 import { Explorer } from "./components/Explorer";
 import { HistoryChart } from "./components/HistoryChart";
+import { StateTimeline } from "./components/StateTimeline";
 import { TopicGraph } from "./components/TopicGraph";
 import { TopicTree } from "./components/TopicTree";
 import { useLive } from "./useLive";
@@ -36,6 +37,9 @@ export default function App() {
   const mps = live.mps.length ? live.mps[live.mps.length - 1].v : 0;
   const historyMin = status?.historyFrom ? Math.round((Date.now() - status.historyFrom) / 60_000) : 0;
   const sel = selected ? live.topics.get(selected) : undefined;
+  const rows = [...live.topics.values()];
+  const fieldCount = rows.filter((r) => r.source).length;
+  const topicCount = `${rows.length - fieldCount}${fieldCount ? ` + ${fieldCount} JSON fields` : ""}`;
 
   return (
     <div className="app">
@@ -46,7 +50,7 @@ export default function App() {
         </div>
         <div className="stats">
           <Stat icon={<span className={`led ${status?.broker.connected && live.connected ? "on" : ""}`} />} label="Broker" value={status?.broker.url ?? "…"} mono />
-          <Stat icon={<Rows3 size={14} />} label="Topics" value={String(live.topics.size)} />
+          <Stat icon={<Rows3 size={14} />} label="Topics" value={topicCount} title={fieldCount ? `${fieldCount} fields split out of nested JSON documents` : undefined} />
           <div className="stat spark">
             <Activity size={14} />
             <div>
@@ -111,11 +115,14 @@ export default function App() {
                   <div className="small muted">
                     {sel.rate.toFixed(0)} msg/min · {sel.count.toLocaleString()} recorded
                   </div>
-                  {sel.value != null && <HistoryChart topics={[sel.topic]} from={Date.now() - 15 * 60_000} to={Date.now()} units={{ [sel.topic]: sel.unit }} live height={150} />}
+                  {sel.source && <div className="small muted">Field of JSON document <span className="mono">{sel.source.split("/").slice(-2).join("/")}</span></div>}
+                  {sel.value != null ? (
+                    <HistoryChart topics={[sel.topic]} from={Date.now() - 15 * 60_000} to={Date.now()} units={{ [sel.topic]: sel.unit }} live height={150} />
+                  ) : (
+                    <StateTimeline topics={[sel.topic]} from={Date.now() - 60 * 60_000} to={Date.now()} live />
+                  )}
                   <div className="detail-actions">
-                    {sel.value != null && (
-                      <button onClick={() => (toggleChart(sel.topic), setView("explorer"))}>Open in trends</button>
-                    )}
+                    <button onClick={() => (chartTopics.includes(sel.topic) || toggleChart(sel.topic), setView("explorer"))}>Open in trends</button>
                     <button onClick={() => setDraft(`What has ${sel.topic} been doing over the last hour?`)}>
                       <MessageSquare size={12} /> Ask about this
                     </button>

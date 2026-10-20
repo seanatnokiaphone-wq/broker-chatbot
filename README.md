@@ -5,7 +5,7 @@ Chat with a live MQTT broker. Ask questions about what's happening right now or 
 - **Recorder** subscribes to the broker (`#` by default) and keeps a rolling history (3 hours by default) in SQLite, plus a live in-memory topic tree.
 - **Chat assistant** uses Claude with tools over that data: overview, list topics, latest values, history, stats, state changes, anomaly scan, and inline charts.
 - **Vite + React UI** with a force-directed topic graph (nodes pulse as messages arrive, alarms turn red), a tree explorer with trend charts over 15 min / 1 h / 3 h, and the chat panel.
-- **Mock UNS generator** publishes 100 ISA-95 shaped topics (`acme/dublin/<area>/<line>/<cell>/<tag>`) with line state machines, OEE, batches, utilities and injected faults every few minutes.
+- **Mock UNS generator** publishes 144 ISA-95 shaped tags (`acme/dublin/<area>/<line>/<cell>/<tag>`) across four packaging lines (each with filler, capper, labeler and palletizer), mixers, an oven, CIP and utilities, plus 8 nested JSON documents. Lines run state machines with OEE, and faults are injected every few minutes.
 
 ```
 ┌───────────────┐   MQTT    ┌──────────────────────────── server ─────────────────────────────┐
@@ -71,6 +71,19 @@ from(bucket: "uns")
 
 Writes are batched (flushed every second, up to 50k points buffered with retries), so an Influx outage never blocks recording. Write counts and the last error show under `influx` in `/api/status`. Change the compose password and token before using it anywhere shared.
 
+## Nested JSON payloads
+
+Most tags publish the usual `{"value": 52.1, "unit": "°C", "quality": "GOOD", "timestamp": …}` envelope. Any other JSON object is treated as a document and split into one **field topic** per leaf, at `<document topic>/<json path>`:
+
+```
+acme/dublin/utilities/boiler/diagnostics   {"health": {"status": "OK", "score": 94.1}, "drum": {"pressure": {"value": 9.8, "unit": "bar"}}, …}
+  …/diagnostics/health/status    "OK"       text field: state timeline, state changes
+  …/diagnostics/health/score     94.1       numeric field: trend, stats, anomalies
+  …/diagnostics/drum/pressure    9.8 bar    an inner {value, unit} object keeps its unit
+```
+
+Each field gets its own history, so it can be trended, searched, shown in the graph and tree (document branches are marked JSON), and queried in chat. Text fields chart as state timelines. `get_latest` on the document topic returns the whole document. The simulator publishes eight examples: an MES work order per packaging line, a batch record per mixer, a palletizer robot snapshot and boiler diagnostics.
+
 ## Things to ask
 
 - "Give me an overview of what's on the broker"
@@ -104,7 +117,7 @@ server/src
   tools.ts          Claude tool definitions and handlers
   chat.ts           Streaming tool-use loop
   broker.ts         Embedded aedes broker
-  simulator/        Mock ISA-95 plant (100 topics)
+  simulator/        Mock ISA-95 plant (144 tags + 8 JSON documents)
 web/src
   App.tsx           Layout, status bar, topic detail
   components/       TopicGraph, Explorer, HistoryChart, Chat

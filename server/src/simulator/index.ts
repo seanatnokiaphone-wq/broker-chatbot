@@ -11,7 +11,8 @@ const client = mqtt.connect(url, {
   reconnectPeriod: 2000,
 });
 
-console.log(`[sim] ${plant.tags.length} UNS topics, publishing to ${url}`);
+const docs = plant.tags.filter((t) => typeof t.read(0) === "object").length;
+console.log(`[sim] ${plant.tags.length - docs} UNS tags + ${docs} nested JSON documents, publishing to ${url}`);
 
 const start = Date.now();
 let timer: NodeJS.Timeout | undefined;
@@ -26,7 +27,9 @@ client.on("connect", () => {
     plant.tick(now);
     for (const tag of plant.tags) {
       if (!first && t % tag.every !== 0) continue;
-      const payload = JSON.stringify({ value: tag.read(t), unit: tag.unit, quality: "GOOD", timestamp: new Date(now).toISOString() });
+      const value = tag.read(t);
+      const timestamp = new Date(now).toISOString();
+      const payload = JSON.stringify(typeof value === "object" ? { ...value, timestamp } : { value, unit: tag.unit, quality: "GOOD", timestamp });
       // Retained state tags go at QoS 1: they matter more, and aedes drops QoS 0 retained publishes to live subscribers.
       client.publish(tag.topic, payload, { qos: tag.retain ? 1 : 0, retain: !!tag.retain });
     }

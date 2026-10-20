@@ -1,8 +1,8 @@
 import { cluster, hierarchy } from "d3-hierarchy";
 import { Search } from "lucide-react";
 import { useMemo, useState } from "react";
-import { display, isAlarm } from "../api";
-import { LEVELS, STATUS } from "../colors";
+import { display, docOf, docTopics, graphTopics, isAlarm } from "../api";
+import { JSON_COLOR, LEVELS, STATUS } from "../colors";
 import { topicMatcher } from "../filter";
 import type { Live } from "../useLive";
 
@@ -11,6 +11,8 @@ interface TNode {
   name: string;
   depth: number;
   leaf: boolean;
+  /** Inside a nested JSON document. */
+  json: boolean;
   children: TNode[];
 }
 
@@ -26,10 +28,12 @@ interface Props {
 
 /** Left-to-right view of the topic tree: one column per ISA-95 level, branches fold, tags show live values. */
 export function TopicTree({ live, selected, onSelect }: Props) {
-  const topicKey = [...live.topics.keys()].sort().join("\n");
+  const topicKey = graphTopics(live.topics).sort().join("\n");
+  const docKey = docTopics(live.topics).sort().join("\n");
   const root = useMemo(() => {
+    const docs = docKey ? docKey.split("\n") : [];
     const byId = new Map<string, TNode>();
-    const top: TNode = { id: "", name: "", depth: -1, leaf: false, children: [] };
+    const top: TNode = { id: "", name: "", depth: -1, leaf: false, json: false, children: [] };
     for (const topic of topicKey ? topicKey.split("\n") : []) {
       const parts = topic.split("/");
       let parent = top;
@@ -37,7 +41,7 @@ export function TopicTree({ live, selected, onSelect }: Props) {
         const id = parts.slice(0, i + 1).join("/");
         let n = byId.get(id);
         if (!n) {
-          n = { id, name, depth: i, leaf: false, children: [] };
+          n = { id, name, depth: i, leaf: false, json: !!docOf(docs, id), children: [] };
           byId.set(id, n);
           parent.children.push(n);
         }
@@ -46,15 +50,16 @@ export function TopicTree({ live, selected, onSelect }: Props) {
       parent.leaf = true;
     }
     return top.children.length === 1 ? top.children[0] : top;
-  }, [topicKey]);
+  }, [topicKey, docKey]);
 
   const branchesFrom = (minDepth: number) => {
     const s = new Set<string>();
-    const walk = (n: TNode) => {
-      if (!n.leaf && n.depth >= minDepth) s.add(n.id);
-      n.children.forEach(walk);
+    // Inside a JSON document only the document itself folds, so opening it shows the whole structure.
+    const walk = (n: TNode, inJson: boolean) => {
+      if (!n.leaf && !inJson && (n.depth >= minDepth || n.json)) s.add(n.id);
+      n.children.forEach((c) => walk(c, n.json));
     };
-    walk(root);
+    walk(root, false);
     return s;
   };
   // null = the default view, with cells folded so the first view fits on screen.
@@ -139,7 +144,7 @@ export function TopicTree({ live, selected, onSelect }: Props) {
             const row = n.leaf ? live.topics.get(n.id) : undefined;
             const alarm = row ? isAlarm(row) : false;
             const fresh = row && now - row.lastTs < 1200;
-            const color = alarm ? STATUS.critical : LEVELS[n.leaf ? 5 : Math.min(n.depth, 4)];
+            const color = alarm ? STATUS.critical : n.leaf ? LEVELS[5] : n.json ? JSON_COLOR : LEVELS[Math.min(n.depth, 4)];
             const folded = collapsed.has(n.id);
             return (
               <g
@@ -162,7 +167,7 @@ export function TopicTree({ live, selected, onSelect }: Props) {
                   <text x={10} dy="0.35em" className="tree-text">
                     <tspan className="branch-name">{n.name}</tspan>
                     <tspan dx={8} className="badge" style={color === LEVELS[0] ? undefined : { fill: color }}>
-                      {LEVEL_BADGE[Math.min(n.depth, 4)]}
+                      {n.json ? "JSON" : LEVEL_BADGE[Math.min(n.depth, 4)]}
                     </tspan>
                     {folded && !keep && <tspan dx={8} className="count">▸ {tagCount(n)} tags</tspan>}
                   </text>

@@ -6,7 +6,7 @@ const client = new Anthropic();
 
 const SYSTEM = `You are an assistant for an industrial MQTT broker. You answer questions about what is happening on the broker right now and over the recorded history (up to ${config.retentionMinutes} minutes), using the tools to read real data. Never invent values: if the data doesn't show something, say so.
 
-The broker usually follows a Unified Namespace laid out to ISA-95: enterprise/site/area/line/cell/tag. Payloads are often JSON with value, unit, quality and timestamp fields.
+The broker usually follows a Unified Namespace laid out to ISA-95: enterprise/site/area/line/cell/tag. Payloads are often JSON with value, unit, quality and timestamp fields. Some topics carry nested JSON documents instead (work orders, batch records, robot and boiler diagnostics). The recorder splits each one into field topics at <document topic>/<json path>, for example acme/dublin/utilities/boiler/diagnostics/drum/pressure, each with its own history. Numeric fields work with get_history and get_stats, text fields with get_state_changes, and get_latest on the document topic returns the whole document.
 
 How to work:
 - If you don't yet know the topic tree, call broker_overview or list_topics before guessing topic names.
