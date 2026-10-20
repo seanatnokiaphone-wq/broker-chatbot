@@ -58,6 +58,10 @@ export function startPredictor(store: Store, client: Publisher) {
       const lat = store.values(t.topic, now - 60 * 60_000, now);
       if (lat.length < 10) continue;
       const last30 = lat.filter((v) => v.ts > now - 30_000).map((v) => v.value);
+      if (!last30.length) {
+        client.publish(`${base}/prediction`, JSON.stringify({ status: "No data", reason: "no latency readings in the last 30 s (link down?)", model: "baseline-v1", timestamp: new Date(now).toISOString() }));
+        continue;
+      }
       const lat30 = mean(last30);
 
       // Past onsets in the last hour: the 15 s rolling mean crossing DRIFT_MS upward, at least 3 minutes apart.

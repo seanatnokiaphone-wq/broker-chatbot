@@ -34,6 +34,31 @@ const shiftOf = () => {
   return h >= 6 && h < 14 ? "A" : h >= 14 && h < 22 ? "B" : "C";
 };
 
+/** Standard normal sample (Box-Muller). */
+const gauss = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
+
+/**
+ * Fill weight process for SPC: 500 g target, σ ≈ 1 g when in control. Every 12-30 minutes a special cause
+ * appears for a while: a step shift in the mean (partly blocked nozzle, setpoint change), a slow drift
+ * (nozzle wear, corrected by the operator) or a burst of extra variation (foaming product).
+ */
+function fillProcess(now: () => number) {
+  let ev = { kind: "none" as "none" | "shift" | "drift" | "spread", from: now() + rand(180, 600) * 1000, until: 0, size: 0 };
+  return () => {
+    const t = now();
+    if (t >= ev.until && ev.until) ev = { kind: "none", from: t + rand(720, 1800) * 1000, until: 0, size: 0 };
+    if (ev.kind === "none" && t >= ev.from) {
+      const kind = (["shift", "drift", "spread"] as const)[Math.floor(Math.random() * 3)];
+      const size = kind === "shift" ? (Math.random() < 0.6 ? 1 : -1) * rand(1.8, 3) : kind === "drift" ? (Math.random() < 0.5 ? 1 : -1) * rand(3, 4.5) : rand(2, 2.6);
+      ev = { kind, from: t, until: t + rand(kind === "spread" ? 240 : 360, kind === "spread" ? 600 : 900) * 1000, size };
+    }
+    const f = ev.kind === "none" || t < ev.from ? 0 : (t - ev.from) / (ev.until - ev.from);
+    const meanShift = ev.kind === "shift" ? ev.size : ev.kind === "drift" ? ev.size * f : 0;
+    const sigma = ev.kind === "spread" && f > 0 ? ev.size : 1;
+    return 500 + meanShift + sigma * gauss();
+  };
+}
+
 /** First-order lag toward a target, so values move smoothly. */
 class Lag {
   constructor(public v: number, private k = 0.15) {}
@@ -92,6 +117,9 @@ export class Plant {
         ["Capper torque drift on line 2", "packaging/line2/capper/torque"],
         ["Line 3 filler motor overheating", "packaging/line3/filler/motor_temp"],
         ["Line 4 jam at labeler", "packaging/line4/state"],
+        ["Network latency drift now, no warning (processing)", "processing/network/drift"],
+        ["Packet loss storm (utilities network)", "utilities/network/loss"],
+        ["Network link down (packaging), filler data lost", "packaging/network/link"],
       ];
       const [name, key] = pool[Math.floor(Math.random() * pool.length)];
       const until = now + rand(120, 300) * 1000;
@@ -179,7 +207,8 @@ export class Plant {
         return round(temp[cell].step(normal * (0.75 + 0.25 * runningFactor()) + hot + 2 * wave(t, 600, phase)) + noise(0.3), 1);
       });
 
-    this.add(`${base}/filler/fill_weight`, s(() => round(state === "Running" ? 500 + noise(2.5) : 0, 1)), "g", 1);
+    const fill = fillProcess(() => Date.now());
+    this.add(`${base}/filler/fill_weight`, s(() => round(state === "Running" ? fill() : 0, 1)), "g", 1);
     this.add(`${base}/filler/nozzle_pressure`, s((t) => round(2.4 + 0.1 * wave(t, 120) + noise(0.03), 2)), "bar", 2);
     this.add(`${base}/filler/motor_temp`, motorTemp("filler", 55), "°C", 2);
     this.add(`${base}/filler/motor_current`, s(() => round(12 * runningFactor() + noise(0.4), 1)), "A", 2);
@@ -199,7 +228,7 @@ export class Plant {
         blipUntil = now + rand(5, 30) * 1000;
         blipFrom = blipUntil + rand(480, 1200) * 1000;
       }
-      return now < blipUntil || Math.random() < 0.01;
+      return now < blipUntil || !!this.fault("packaging/network/link") || Math.random() < 0.01;
     };
     this.add(`${base}/filler/counts`, s((t) => {
       const dt = lastFillT ? t - lastFillT : 0;
@@ -355,11 +384,15 @@ export class Plant {
     const base = `${area}/network`;
     const drift = { onset: Date.now() + rand(90, 420) * 1000 + index * 120_000, warn: rand(60, 180), ramp: rand(60, 90), hold: rand(60, 150), recover: rand(45, 75), warns: true };
     let at = 0;
-    const st = { p: 0, d: 0 };
+    const st = { p: 0, d: 0, storm: 0, down: false };
     const update = () => {
       const now = Date.now();
       if (now - at < 500) return st;
       at = now;
+      // Injected fault: start a drift right now, without the usual early-warning signs.
+      if (this.fault(`${base}/drift`) && now < drift.onset - 5000) Object.assign(drift, { onset: now, warns: false });
+      st.storm = this.fault(`${base}/loss`) ? 1 : 0;
+      st.down = !!this.fault(`${base}/link`);
       let rel = (now - drift.onset) / 1000;
       if (rel > drift.ramp + drift.hold + drift.recover) {
         // Schedule the next drift roughly 10 minutes after this one started.
@@ -373,15 +406,17 @@ export class Plant {
       return st;
     };
     const baseLatency = (t: number) => Math.min(5000, Math.max(50, 2500 + 700 * wave(t, 240, index) + noise(300)));
+    // While the link is down nothing gets through, so the measurement tags go quiet.
+    const down = () => update().down;
     this.add(`${base}/latency_ms`, (t) => {
-      const { d } = update();
-      return Math.round(baseLatency(t) * (1 - d) + d * (9000 + noise(400)));
-    }, "ms", 1);
-    this.add(`${base}/jitter_ms`, () => { const { p, d } = update(); return Math.round(Math.max(10, 120 + noise(40) + p * 600 + d * 900)); }, "ms", 1);
-    this.add(`${base}/packet_loss_pct`, () => { const { p, d } = update(); return round(Math.max(0, 0.2 + noise(0.1) + p * 2.5 + d * 4), 2); }, "%", 2);
-    this.add(`${base}/throughput_mbps`, () => { const { p, d } = update(); return round(Math.max(1, 85 + noise(4) - p * 25 - d * 45), 1); }, "Mbps", 2);
-    this.add(`${base}/retransmits_per_min`, () => { const { p, d } = update(); return Math.round(Math.max(0, 4 + noise(2) + p * 40 + d * 80)); }, undefined, 5);
-    this.add(`${base}/link_state`, () => (update().d > 0.5 ? "Degraded" : "Up"), undefined, 5, true);
+      const { d, storm } = update();
+      return Math.round(baseLatency(t) * (1 - d) + d * (9000 + noise(400)) + storm * 600);
+    }, "ms", 1, false, down);
+    this.add(`${base}/jitter_ms`, () => { const { p, d, storm } = update(); return Math.round(Math.max(10, 120 + noise(40) + p * 600 + d * 900 + storm * 350)); }, "ms", 1, false, down);
+    this.add(`${base}/packet_loss_pct`, () => { const { p, d, storm } = update(); return round(Math.max(0, 0.2 + noise(0.1) + p * 2.5 + d * 4 + storm * 9), 2); }, "%", 2, false, down);
+    this.add(`${base}/throughput_mbps`, () => { const { p, d, storm } = update(); return round(Math.max(1, 85 + noise(4) - p * 25 - d * 45 - storm * 35), 1); }, "Mbps", 2, false, down);
+    this.add(`${base}/retransmits_per_min`, () => { const { p, d, storm } = update(); return Math.round(Math.max(0, 4 + noise(2) + p * 40 + d * 80 + storm * 120)); }, undefined, 5, false, down);
+    this.add(`${base}/link_state`, () => { const { d, storm, down } = update(); return down ? "Down" : d > 0.5 || storm ? "Degraded" : "Up"; }, undefined, 5, true);
   }
 
   private utilities() {

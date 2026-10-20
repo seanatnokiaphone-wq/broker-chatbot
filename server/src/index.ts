@@ -10,6 +10,7 @@ import { config } from "./config.js";
 import { startInflux } from "./influx.js";
 import { startPredictor } from "./predictor.js";
 import { startRecorder } from "./recorder.js";
+import { spc, specFor, type SpcChart } from "./spc.js";
 import { Store, type TopicInfo } from "./store.js";
 
 const embedded = config.mqttUrl ? null : await startEmbeddedBroker(config.embeddedPort);
@@ -65,6 +66,26 @@ app.get("/api/gaps", (req, res) => {
   const to = Number(req.query.to) || Date.now();
   const from = Number(req.query.from) || to - 60 * 60_000;
   res.json(store.sequenceGaps(String(req.query.topic ?? ""), from, to));
+});
+
+// SPC chart: control limits, rule violations and capability for a numeric topic.
+app.get("/api/spc", (req, res) => {
+  const topic = String(req.query.topic ?? "");
+  const to = Number(req.query.to) || Date.now();
+  const from = Number(req.query.from) || to - 60 * 60_000;
+  const num = (k: string) => (req.query[k] != null && req.query[k] !== "" && Number.isFinite(Number(req.query[k])) ? Number(req.query[k]) : undefined);
+  const spec = specFor(topic);
+  res.json(
+    spc(store.values(topic, from, to), {
+      ...spec,
+      chart: (["xbar-r", "xbar-s", "imr"] as SpcChart[]).find((c) => c === req.query.chart) ?? "xbar-r",
+      n: num("n"),
+      every: num("every"),
+      lsl: num("lsl") ?? spec.lsl,
+      usl: num("usl") ?? spec.usl,
+      target: num("target") ?? spec.target,
+    }),
+  );
 });
 
 // State changes for text topics, for the state timeline chart.

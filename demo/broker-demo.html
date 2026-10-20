@@ -203,6 +203,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .stats { gap: 10px 18px; order: 3; flex-basis: 100%; }
   .fault-wrap { margin-left: auto; }
 }
+.spc-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 2px; }
+.spc .good, .spc-cap .good, .spc-status.good { color: var(--good); }
+.spc-status.bad, .spc-cap .bad { color: #e66767; }
+.spc-cap .warn { color: var(--warning); }
+.spc-cap { display: flex; flex-wrap: wrap; gap: 4px 10px; padding-top: 2px; }
+.spc-label { font-size: 11px; margin-top: 2px; }
+.btn.mini.on { border-color: var(--accent); color: var(--accent); }
 </style>
 
 <div class="app">
@@ -296,6 +303,26 @@ const rand = (a, b) => a + Math.random() * (b - a);
 const noise = (n) => (Math.random() - 0.5) * 2 * n;
 const round = (v, dp = 2) => Math.round(v * 10 ** dp) / 10 ** dp;
 const wave = (ts, periodS, phase = 0) => Math.sin((2 * Math.PI * ts) / (periodS * 1000) + phase);
+const gauss = () => Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
+/**
+ * Fill weight process for SPC: 500 g target, σ ≈ 1 g in control. Every 12-30 minutes a special cause appears:
+ * a step shift in the mean, a slow drift (nozzle wear, corrected by the operator) or a burst of extra variation.
+ */
+function fillProcess(now) {
+  let ev = { kind: "none", from: now() + rand(180, 600) * 1000, until: 0, size: 0 };
+  return () => {
+    const t = now();
+    if (t >= ev.until && ev.until) ev = { kind: "none", from: t + rand(720, 1800) * 1000, until: 0, size: 0 };
+    if (ev.kind === "none" && t >= ev.from) {
+      const kind = ["shift", "drift", "spread"][Math.floor(Math.random() * 3)];
+      const size = kind === "shift" ? (Math.random() < 0.6 ? 1 : -1) * rand(1.8, 3) : kind === "drift" ? (Math.random() < 0.5 ? 1 : -1) * rand(3, 4.5) : rand(2, 2.6);
+      ev = { kind, from: t, until: t + rand(kind === "spread" ? 240 : 360, kind === "spread" ? 600 : 900) * 1000, size };
+    }
+    const f = ev.kind === "none" || t < ev.from ? 0 : (t - ev.from) / (ev.until - ev.from);
+    const shift = ev.kind === "shift" ? ev.size : ev.kind === "drift" ? ev.size * f : 0;
+    return 500 + shift + (ev.kind === "spread" && f > 0 ? ev.size : 1) * gauss();
+  };
+}
 class Lag { constructor(v, k = 0.15) { this.v = v; this.k = k; } step(target, dt = 1) { this.v += (target - this.v) * (1 - Math.pow(1 - this.k, dt)); return this.v; } }
 
 const FAULTS = [
@@ -307,6 +334,10 @@ const FAULTS = [
   ["Capper torque drift (line 2), rejects rising", "packaging/line2/capper/torque"],
   ["Filler motor overheating (line 3)", "packaging/line3/filler/motor_temp"],
   ["Labeler web break, line 4 down", "packaging/line4/state"],
+  ["Network latency drift now, no warning (processing)", "processing/network/drift"],
+  ["Network latency drift now, no warning (packaging)", "packaging/network/drift"],
+  ["Packet loss storm (utilities network)", "utilities/network/loss"],
+  ["Network link down (packaging), filler data lost", "packaging/network/link"],
 ];
 
 class Plant {
@@ -397,7 +428,8 @@ class Plant {
     this.add(`${base}/oee/quality`, () => round(qual() * 100, 1), "%", 10);
     this.add(`${base}/oee/oee`, () => round(avail() * perf() * qual() * 100, 1), "%", 10);
     const mt = (c) => (n) => round(temps[c].v + 2 * wave(n, 600, phase) + noise(0.3), 1);
-    this.add(`${base}/filler/fill_weight`, () => round(run() ? 500 + noise(2.5) : 0, 1), "g", 1);
+    const fill = fillProcess(() => this.now);
+    this.add(`${base}/filler/fill_weight`, () => round(run() ? fill() : 0, 1), "g", 1);
     this.add(`${base}/filler/nozzle_pressure`, (n) => round(2.4 + 0.1 * wave(n, 120) + noise(0.03), 2), "bar", 2);
     this.add(`${base}/filler/motor_temp`, mt("filler"), "°C", 2);
     this.add(`${base}/filler/motor_current`, () => round(12 * (run() ? 1 : 0.2) + noise(0.4), 1), "A", 2);
@@ -408,7 +440,7 @@ class Plant {
     fc.rejects = fc.filled * 0.004;
     const lost = () => {
       if (this.now >= fc.blipFrom) { fc.blipUntil = this.now + rand(5, 30) * 1000; fc.blipFrom = fc.blipUntil + rand(480, 1200) * 1000; }
-      return this.now < fc.blipUntil || Math.random() < 0.01;
+      return this.now < fc.blipUntil || !!this.fault("packaging/network/link") || Math.random() < 0.01;
     };
     this.add(`${base}/filler/counts`, (n) => {
       const dt = fc.last ? (n - fc.last) / 1000 : 0;
@@ -589,9 +621,13 @@ class Plant {
   network(area, index) {
     const base = `${area}/network`;
     const drift = { onset: this.now + rand(90, 420) * 1000 + index * 120_000, warn: rand(60, 180), ramp: rand(60, 90), hold: rand(60, 150), recover: rand(45, 75), warns: true };
-    const st = { p: 0, d: 0 };
+    const st = { p: 0, d: 0, storm: 0, down: false };
     const ease = (x) => x * x * (3 - 2 * x);
     this.updaters.push((now) => {
+      // Injected fault: start a drift right now, without the usual early-warning signs.
+      if (this.fault(`${base}/drift`) && now < drift.onset - 5000) Object.assign(drift, { onset: now, warns: false });
+      st.storm = this.fault(`${base}/loss`) ? 1 : 0;
+      st.down = !!this.fault(`${base}/link`);
       let rel = (now - drift.onset) / 1000;
       if (rel > drift.ramp + drift.hold + drift.recover) {
         // Schedule the next drift roughly 10 minutes after this one started.
@@ -603,12 +639,14 @@ class Plant {
       if (st.d > 0) st.p = Math.max(st.p, 1 - st.d * 0.3);
     });
     const baseLatency = (t) => Math.min(5000, Math.max(50, 2500 + 700 * wave(t, 240, index) + noise(300)));
-    this.add(`${base}/latency_ms`, (t) => Math.round(baseLatency(t) * (1 - st.d) + st.d * (9000 + noise(400))), "ms", 1);
-    this.add(`${base}/jitter_ms`, () => Math.round(Math.max(10, 120 + noise(40) + st.p * 600 + st.d * 900)), "ms", 1);
-    this.add(`${base}/packet_loss_pct`, () => round(Math.max(0, 0.2 + noise(0.1) + st.p * 2.5 + st.d * 4), 2), "%", 2);
-    this.add(`${base}/throughput_mbps`, () => round(Math.max(1, 85 + noise(4) - st.p * 25 - st.d * 45), 1), "Mbps", 2);
-    this.add(`${base}/retransmits_per_min`, () => Math.round(Math.max(0, 4 + noise(2) + st.p * 40 + st.d * 80)), undefined, 5);
-    this.add(`${base}/link_state`, () => (st.d > 0.5 ? "Degraded" : "Up"), undefined, 5, true);
+    // While the link is down nothing gets through, so the measurement tags go quiet.
+    const down = () => st.down;
+    this.add(`${base}/latency_ms`, (t) => Math.round(baseLatency(t) * (1 - st.d) + st.d * (9000 + noise(400)) + st.storm * 600), "ms", 1, false, down);
+    this.add(`${base}/jitter_ms`, () => Math.round(Math.max(10, 120 + noise(40) + st.p * 600 + st.d * 900 + st.storm * 350)), "ms", 1, false, down);
+    this.add(`${base}/packet_loss_pct`, () => round(Math.max(0, 0.2 + noise(0.1) + st.p * 2.5 + st.d * 4 + st.storm * 9), 2), "%", 2, false, down);
+    this.add(`${base}/throughput_mbps`, () => round(Math.max(1, 85 + noise(4) - st.p * 25 - st.d * 45 - st.storm * 35), 1), "Mbps", 2, false, down);
+    this.add(`${base}/retransmits_per_min`, () => Math.round(Math.max(0, 4 + noise(2) + st.p * 40 + st.d * 80 + st.storm * 120)), undefined, 5, false, down);
+    this.add(`${base}/link_state`, () => (st.down ? "Down" : st.d > 0.5 || st.storm ? "Degraded" : "Up"), undefined, 5, true);
   }
 }
 
@@ -741,7 +779,9 @@ function predictTick(now) {
     if (!st) predState.set(base, (st = { drifting: false, warnedAt: null, onsets: [], leads: [], missed: 0, falseAlarms: 0 }));
     const lat = slice(t, now - 60 * 60_000, now);
     if (lat.v.length < 10) continue;
-    const lat30 = meanOf(slice(t, now - 30_000, now).v);
+    const recent = slice(t, now - 30_000, now).v;
+    if (!recent.length) { emit({ topic: `${base}/prediction`, read: () => ({ status: "No data", reason: "no latency readings in the last 30 s (link down?)", model: "baseline-v1" }) }, now); continue; }
+    const lat30 = meanOf(recent);
 
     // Past onsets in the last hour: the 15 s rolling mean crossing DRIFT_MS upward, at least 3 minutes apart.
     const onsets = [];
@@ -803,6 +843,72 @@ function predictTick(now) {
     };
     emit({ topic: `${base}/prediction`, read: () => doc }, now);
   }
+}
+
+
+/* ------------------------------------------------------------------ *
+ * SPC (same method as server/src/spc.ts): X̄-R, X̄-S and I-MR charts, Western Electric rules, capability.
+ * ------------------------------------------------------------------ */
+const SPC_SPECS = { fill_weight: { lsl: 495, target: 500, usl: 505, validAbove: 100 } };
+const specFor = (topic) => SPC_SPECS[topic.split("/").pop()] ?? {};
+const SPC_K = { 2: [1.88, 0, 3.267, 1.128, 2.659, 0, 3.267, 0.7979], 3: [1.023, 0, 2.574, 1.693, 1.954, 0, 2.568, 0.8862], 4: [0.729, 0, 2.282, 2.059, 1.628, 0, 2.266, 0.9213], 5: [0.577, 0, 2.114, 2.326, 1.427, 0, 2.089, 0.94], 6: [0.483, 0, 2.004, 2.534, 1.287, 0.03, 1.97, 0.9515], 7: [0.419, 0.076, 1.924, 2.704, 1.182, 0.118, 1.882, 0.9594], 8: [0.373, 0.136, 1.864, 2.847, 1.099, 0.185, 1.815, 0.965], 9: [0.337, 0.184, 1.816, 2.97, 1.032, 0.239, 1.761, 0.9693], 10: [0.308, 0.223, 1.777, 3.078, 0.975, 0.284, 1.716, 0.9727] }; // A2 D3 D4 d2 A3 B3 B4 c4
+const SPC_RULES = { 1: "1 point beyond 3σ", 2: "2 of 3 points beyond 2σ, same side", 3: "4 of 5 points beyond 1σ, same side", 4: "8 points in a row on one side of the centre line", 5: "6 points in a row steadily rising or falling", 6: "Range/spread above its upper control limit" };
+const RULE_SHORT = { 1: "beyond 3σ", 2: "2 of 3 beyond 2σ", 3: "4 of 5 beyond 1σ", 4: "8 on one side", 5: "6 trending", 6: "spread above UCL" };
+const sdOf = (xs) => { const m = meanOf(xs); return Math.sqrt(xs.reduce((a, x) => a + (x - m) ** 2, 0) / Math.max(1, xs.length - 1)); };
+function weRules(xs, cl, s) {
+  const z = xs.map((x) => (x - cl) / (s || 1e-9));
+  return z.map((zi, i) => {
+    const out = new Set();
+    if (Math.abs(zi) > 3) out.add(1);
+    for (const side of [1, -1]) {
+      const beyond = (k, lim) => z.slice(Math.max(0, i - k + 1), i + 1).filter((v) => side * v > lim).length;
+      if (i >= 2 && side * zi > 2 && beyond(3, 2) >= 2) out.add(2);
+      if (i >= 4 && side * zi > 1 && beyond(5, 1) >= 4) out.add(3);
+      if (i >= 7 && beyond(8, 0) === 8) out.add(4);
+    }
+    if (i >= 5) { const d = xs.slice(i - 5, i + 1).map((v, j, a) => (j ? Math.sign(v - a[j - 1]) : 0)).slice(1); if (d.every((v) => v > 0) || d.every((v) => v < 0)) out.add(5); }
+    return [...out];
+  });
+}
+function spcCalc(topic, from, to, opts = {}) {
+  const t = store.get(topic); if (!t?.numeric) return null;
+  const chart = opts.chart || "xbar-r", n = Math.min(10, Math.max(2, Math.round(opts.n || 5)));
+  const every = Math.max(1, opts.every || (chart === "imr" ? 10 : 60)) * 1000;
+  const sp = specFor(topic), spec = { lsl: opts.lsl ?? sp.lsl, usl: opts.usl ?? sp.usl, target: opts.target ?? sp.target, validAbove: sp.validAbove };
+  const sl = slice(t, from, to), groups = [], all = [];
+  sl.v.forEach((v, i) => {
+    if (typeof v !== "number" || (spec.validAbove != null && v <= spec.validAbove)) return;
+    all.push(v);
+    const slot = Math.floor(sl.ts[i] / every) * every, g = groups[groups.length - 1];
+    if (g && g.ts === slot) { if (chart !== "imr" && g.xs.length < n) g.xs.push(v); } else groups.push({ ts: slot, xs: [v] });
+  });
+  const used = chart === "imr" ? groups : groups.filter((g) => g.xs.length === n);
+  if (all.length < 10 || used.length < (chart === "imr" ? 10 : 5)) return null;
+  let points, x, r, sigmaWithin;
+  if (chart === "imr") {
+    const xs = used.map((g) => g.xs[0]), mrs = xs.slice(1).map((v, i) => Math.abs(v - xs[i])), mrBar = meanOf(mrs), xBar = meanOf(xs);
+    sigmaWithin = mrBar / 1.128;
+    x = { cl: xBar, ucl: xBar + 3 * sigmaWithin, lcl: xBar - 3 * sigmaWithin, sigma: sigmaWithin };
+    r = { cl: mrBar, ucl: 3.267 * mrBar, lcl: 0, label: "MR" };
+    points = used.map((g, i) => ({ ts: g.ts, x: xs[i], r: i ? mrs[i - 1] : null }));
+  } else {
+    const [A2, D3, D4, d2, A3, B3, B4, c4] = SPC_K[n], S = chart === "xbar-s";
+    const means = used.map((g) => meanOf(g.xs)), spread = used.map((g) => (S ? sdOf(g.xs) : Math.max(...g.xs) - Math.min(...g.xs)));
+    const xBar = meanOf(means), sBar = meanOf(spread), half = (S ? A3 : A2) * sBar;
+    sigmaWithin = S ? sBar / c4 : sBar / d2;
+    x = { cl: xBar, ucl: xBar + half, lcl: xBar - half, sigma: half / 3 };
+    r = S ? { cl: sBar, ucl: B4 * sBar, lcl: B3 * sBar, label: "S" } : { cl: sBar, ucl: D4 * sBar, lcl: D3 * sBar, label: "R" };
+    points = used.map((g, i) => ({ ts: g.ts, x: means[i], r: spread[i] }));
+  }
+  const fired = weRules(points.map((p) => p.x), x.cl, x.sigma);
+  points.forEach((p, i) => { p.rules = fired[i]; if (p.r != null && p.r > r.ucl) p.rules.push(6); });
+  const violations = points.flatMap((p) => p.rules.map((rule) => ({ ts: p.ts, rule, text: SPC_RULES[rule] })));
+  const m = meanOf(all), sAll = sdOf(all), { lsl, usl } = spec;
+  const cap = (s) => ({ p: lsl != null && usl != null ? (usl - lsl) / (6 * s) : null, pk: lsl != null || usl != null ? Math.min(usl != null ? (usl - m) / (3 * s) : Infinity, lsl != null ? (m - lsl) / (3 * s) : Infinity) : null });
+  const w = cap(sigmaWithin), o = cap(sAll);
+  const out = lsl != null || usl != null ? all.filter((v) => (lsl != null && v < lsl) || (usl != null && v > usl)).length : null;
+  return { chart, n: chart === "imr" ? 1 : n, every: every / 1000, points, x, r, spec, violations,
+    capability: { mean: m, sigmaWithin, sigmaOverall: sAll, cp: w.p, cpk: w.pk, pp: o.p, ppk: o.pk, outOfSpecPct: out == null ? null : (out / all.length) * 100, readings: all.length } };
 }
 
 /* ------------------------------------------------------------------ *
@@ -960,6 +1066,24 @@ function makeTools(onCall) {
       if (!d) throw new Error(`Not a JSON document topic. Documents: ${[...docs.keys()].join(", ")}`);
       return { topic: String(i.topic), document: d };
     }),
+    tool("spc_analysis", "Statistical process control for numeric topics, e.g. acme/dublin/packaging/+/filler/fill_weight. Builds an X̄-R (default), X̄-S or I-MR chart over the window, with control limits, Western Electric rule violations (1: beyond 3σ, 2: 2 of 3 beyond 2σ, 3: 4 of 5 beyond 1σ, 4: 8 in a row one side, 5: 6 trending, 6: range above UCL) and capability (Cp, Cpk, Pp, Ppk, % out of spec) against spec limits. fill_weight has spec 495-505 g, target 500 g; pass lsl/usl/target for other tags. Use for SPC, 'is the process in control', capability or Cpk questions.", { type: "object", properties: { filter: { type: "string", description: "Topic or MQTT filter." }, chart: { type: "string", enum: ["xbar-r", "xbar-s", "imr"] }, n: { type: "number", description: "Subgroup size 2-10 (default 5)." }, every: { type: "number", description: "Seconds between subgroups (default 60; I-MR default 10)." }, lsl: { type: "number" }, usl: { type: "number" }, target: { type: "number" }, ...winProps, max_violations: { type: "number", description: "Most recent violations per topic (default 10)." } }, required: ["filter"] }, (i) => {
+      const { from, to } = win(i), maxV = Math.min(50, Number(i.max_violations) || 10);
+      const topics = matchTopics(String(i.filter)).filter((t) => t.numeric).slice(0, 12);
+      if (!topics.length) return { note: "No numeric topics match that filter." };
+      const num = (k) => (i[k] == null ? undefined : Number(i[k]));
+      return { from: iso(from), to: iso(to), topics: topics.map((t) => {
+        const res = spcCalc(t.topic, from, to, { chart: i.chart, n: num("n"), every: num("every"), lsl: num("lsl"), usl: num("usl"), target: num("target") });
+        if (!res) return { topic: t.topic, note: "Too few readings in this window." };
+        const c = res.capability, byRule = {};
+        for (const v of res.violations) byRule[`${v.rule}: ${v.text}`] = (byRule[`${v.rule}: ${v.text}`] ?? 0) + 1;
+        return { topic: t.topic, unit: t.unit, chart: res.chart, subgroupSize: res.n, everySeconds: res.every, subgroups: res.points.length, status: res.violations.length ? "Out of control" : "In control",
+          limits: { x: { cl: r3(res.x.cl), ucl: r3(res.x.ucl), lcl: r3(res.x.lcl) }, [res.r.label]: { cl: r3(res.r.cl), ucl: r3(res.r.ucl), lcl: r3(res.r.lcl) } },
+          spec: { lsl: res.spec.lsl, target: res.spec.target, usl: res.spec.usl },
+          capability: { mean: r3(c.mean), sigmaWithin: r3(c.sigmaWithin), sigmaOverall: r3(c.sigmaOverall), cp: r3(c.cp, 2), cpk: r3(c.cpk, 2), pp: r3(c.pp, 2), ppk: r3(c.ppk, 2), outOfSpecPct: r3(c.outOfSpecPct, 2), readings: c.readings },
+          violationsByRule: byRule,
+          recentViolations: res.violations.slice(-maxV).reverse().map((v) => ({ at: iso(v.ts), rule: v.rule, text: v.text, value: r3(res.points.find((p) => p.ts === v.ts)?.x) })) };
+      }) };
+    }),
     tool("predict_network_drift", "Current network-drift prediction per area (from the baseline predictor publishing <area>/network/prediction): status, drift risk %, latency now and 2-minute forecast, when the next drift is due, the reasons, and the predictor's own track record (drifts seen, predicted in advance, missed, false alarms, median warning lead time). Use for questions about network latency drift, whether a drift is coming, or how good the prediction is. For the risk over time, use get_history on <area>/network/prediction/drift_risk_pct.", { type: "object", properties: { area: { type: "string", description: "Optional area name, e.g. packaging." } } }, (i) => {
       const preds = [...docs.keys()].filter((d) => d.endsWith("/network/prediction") && (!i.area || d.includes(`/${i.area}/`)));
       if (!preds.length) return { note: "No predictions for that area." };
@@ -1102,6 +1226,51 @@ function drawChart(el, topics, from, to, height = 200, onZoom, markers = []) {
       wrap.appendChild(lg);
     }
   }
+}
+
+/** SPC chart into el: X̄ (or individuals) with control limits and rule hits, the spread chart, and capability. */
+const spcType = new Map(); // topic -> chart type
+function drawSpc(el, topic, from, to, rerender) {
+  const chart = spcType.get(topic) || "xbar-r", unit = store.get(topic)?.unit || "";
+  const res = spcCalc(topic, from, to, { chart });
+  const f2 = (v, dp = 2) => (v == null || !isFinite(v) ? "–" : v.toFixed(dp));
+  const cls = (v) => (v == null ? "" : v >= 1.33 ? "good" : v >= 1 ? "warn" : "bad");
+  el.innerHTML = `<div class="spc-head"><div class="seg">${[["xbar-r", "X̄-R"], ["xbar-s", "X̄-S"], ["imr", "I-MR"]].map(([id, l]) => `<button data-c="${id}" aria-pressed="${id === chart}">${l}</button>`).join("")}</div><span class="small spc-status"></span></div>`;
+  el.querySelector(".seg").onclick = (e) => { const b = e.target.closest("button"); if (b) { spcType.set(topic, b.dataset.c); rerender(); } };
+  if (!res) { el.insertAdjacentHTML("beforeend", `<div class="small muted">Not enough readings in this window for SPC.</div>`); return; }
+  const fired = [...new Set(res.violations.map((v) => v.rule))].sort();
+  const st = el.querySelector(".spc-status");
+  st.className = `small spc-status ${res.violations.length ? "bad" : "good"}`;
+  st.textContent = res.violations.length ? `⚠ ${res.violations.length} signal${res.violations.length === 1 ? "" : "s"} · rule${fired.length > 1 ? "s" : ""} ${fired.join(", ")}` : "✓ In control";
+  st.title = fired.map((r) => `Rule ${r}: ${SPC_RULES[r]}`).join("\n") + "\n\nLatest:\n" + res.violations.slice(-6).map((v) => `${timeFmt(v.ts)}: rule ${v.rule}`).join("\n");
+  const panel = (label, H, pts, key, lim, color, showLcl, ruleOf) => {
+    el.insertAdjacentHTML("beforeend", `<div class="spc-label small muted">${label}</div>`);
+    const wrap = document.createElement("div"); wrap.className = "chart"; el.appendChild(wrap);
+    const W = Math.max(260, wrap.clientWidth || el.clientWidth || 300), m = { t: 6, r: 10, b: key === "x" ? 20 : 4, l: 44 };
+    const vals = pts.map((p) => p[key]).filter((v) => v != null);
+    const lo = key === "x" ? Math.min(lim.lcl, ...vals) : 0, hi = Math.max(lim.ucl, ...vals), pad = (hi - lo) * 0.1;
+    const x = d3.scaleTime().domain([pts[0].ts, pts[pts.length - 1].ts]).range([m.l, W - m.r]);
+    const y = d3.scaleLinear().domain([lo - (key === "x" ? pad : 0), hi + pad]).range([H - m.b, m.t]);
+    const svg = d3.select(wrap).append("svg").attr("viewBox", `0 0 ${W} ${H}`).attr("height", H);
+    if (key === "x") svg.append("g").attr("transform", `translate(0,${H - m.b})`).call(d3.axisBottom(x).ticks(Math.max(2, Math.floor(W / 110))).tickFormat(timeFmt).tickSizeOuter(0)).call((g) => g.selectAll("text").attr("fill", "var(--muted)").attr("font-size", 10)).call((g) => g.selectAll("line,path").attr("stroke", "var(--line-2)"));
+    svg.append("g").attr("transform", `translate(${m.l},0)`).call(d3.axisLeft(y).ticks(key === "x" ? 4 : 2).tickFormat(d3.format(".1f"))).call((g) => g.select(".domain").remove()).call((g) => g.selectAll("line").attr("stroke", "var(--line)")).call((g) => g.selectAll("text").attr("fill", "var(--muted)").attr("font-size", 10));
+    const hl = (v, stroke, dash) => svg.append("line").attr("x1", m.l).attr("x2", W - m.r).attr("y1", y(v)).attr("y2", y(v)).attr("stroke", stroke).attr("stroke-dasharray", dash);
+    hl(lim.ucl, "var(--critical)", "4 3"); hl(lim.cl, "var(--muted)", "2 3"); if (showLcl && lim.lcl > 0) hl(lim.lcl, "var(--critical)", "4 3");
+    const ok = pts.filter((p) => p[key] != null);
+    svg.append("path").datum(ok).attr("fill", "none").attr("stroke", color).attr("stroke-width", 1.4).attr("d", d3.line().x((p) => x(p.ts)).y((p) => y(p[key])));
+    for (const p of ok) {
+      const bad = ruleOf(p);
+      if (!bad && key !== "x") continue;
+      svg.append("circle").attr("cx", x(p.ts)).attr("cy", y(p[key])).attr("r", bad ? 3.2 : 1.8).attr("fill", bad ? "var(--critical)" : color)
+        .append("title").text(`${timeFmt(p.ts)} · ${p[key].toFixed(2)}${key === "x" && unit ? " " + unit : ""}${bad ? " · " + p.rules.map((r) => RULE_SHORT[r]).join(", ") : ""}`);
+    }
+  };
+  panel(`${res.chart === "imr" ? "Individuals" : `X̄ (n=${res.n}, every ${res.every} s)`} · UCL ${f2(res.x.ucl)} · CL ${f2(res.x.cl)} · LCL ${f2(res.x.lcl)} ${unit}`, 120, res.points, "x", res.x, "var(--accent)", true, (p) => p.rules.some((r) => r !== 6));
+  panel(`${res.r.label} · UCL ${f2(res.r.ucl)} · ${res.r.label}̄ ${f2(res.r.cl)}`, 56, res.points, "r", res.r, "#9085e9", false, (p) => p.rules.includes(6));
+  const c = res.capability;
+  el.insertAdjacentHTML("beforeend", `<div class="spc-cap small">${res.spec.lsl != null || res.spec.usl != null
+    ? `<span>Spec ${f2(res.spec.lsl, 1)}–${f2(res.spec.usl, 1)} ${unit}</span><span class="${cls(c.cp)}" title="Potential capability, within σ">Cp ${f2(c.cp)}</span><span class="${cls(c.cpk)}" title="Capability allowing for centring, within σ">Cpk ${f2(c.cpk)}</span><span class="${cls(c.ppk)}" title="Performance, overall σ">Ppk ${f2(c.ppk)}</span><span class="${c.outOfSpecPct ? "bad" : ""}">${f2(c.outOfSpecPct)}% out</span>`
+    : `<span class="muted">No spec limits for this tag: control limits only</span>`}<span class="muted">x̄ ${f2(c.mean)} · σ ${f2(c.sigmaWithin, 3)}</span></div>`);
 }
 
 /** Trend for text topics: a row of coloured state bands per topic, with time in each state. */
@@ -1418,6 +1587,7 @@ function renderHover() {
 /* Trend cards: clicking tags stacks live cards beside the graph, newest first, each with its own range. */
 let detailChartAt = 0;
 const cardWins = new Map(); // topic -> time window
+const spcOn = new Set(); // cards showing SPC instead of the trend
 const MAX_CARDS = 8;
 function openCard(topic) { cards = [topic, ...cards.filter((c) => c !== topic)].slice(0, MAX_CARDS); renderDetail(); }
 function addToTrends(topics) { picked = [...new Set([...picked, ...topics])].slice(-6); showTab("explorer"); renderTrend(); syncTree(); }
@@ -1466,19 +1636,21 @@ function renderDetail() {
     c.innerHTML = `<div class="card-head"><div class="mono small"></div><button class="icon-btn" data-a="close" aria-label="Close card">✕</button></div>
       <div class="card-row"><div class="v ${isAlarm(t) ? "bad" : ""}"></div><div class="seg">${[15, 60, 180].map((m) => `<button data-m="${m}" aria-pressed="${win.live && m === min}">${m < 60 ? m + "m" : m / 60 + "h"}</button>`).join("")}</div></div>
       <div class="dchart"></div>
-      <div class="card-foot"><span class="small muted"></span><span class="btns">${t.source ? '<button class="btn mini" data-a="raw" title="Show the raw JSON document">{ }</button> ' : ""}<button class="btn mini" data-a="trend">Trends</button> <button class="btn mini" data-a="ask">Ask</button></span></div>`;
+      <div class="card-foot"><span class="small muted"></span><span class="btns">${t.numeric ? `<button class="btn mini ${spcOn.has(topic) ? "on" : ""}" data-a="spc" title="Statistical process control: control limits, rule violations and capability">SPC</button> ` : ""}${t.source ? '<button class="btn mini" data-a="raw" title="Show the raw JSON document">{ }</button> ' : ""}<button class="btn mini" data-a="trend">Trends</button> <button class="btn mini" data-a="ask">Ask</button></span></div>`;
     c.querySelector(".mono").textContent = topic.split("/").slice(-3).join("/");
     c.querySelector(".mono").title = topic;
     c.querySelector(".v").textContent = fmt(t);
     c.querySelector(".card-foot .muted").textContent = `${ratePerMin(t)} msg/min${t.source ? " · JSON field" : ""}`;
     c.querySelector('[data-a="close"]').onclick = () => { cards = cards.filter((x) => x !== topic); renderDetail(); };
     c.querySelector('[data-a="trend"]').onclick = () => addToTrends([topic]);
+    if (t.numeric) c.querySelector('[data-a="spc"]').onclick = () => { spcOn.has(topic) ? spcOn.delete(topic) : spcOn.add(topic); renderDetail(); };
     if (t.source) c.querySelector('[data-a="raw"]').onclick = () => openCard(t.source);
     c.querySelector('[data-a="ask"]').onclick = () => { $("input").value = `What has ${topic} been doing over the last hour?`; $("input").focus(); };
     c.querySelector(".seg").onclick = (e) => { const b = e.target.closest("button"); if (b) { win.setMinutes(Number(b.dataset.m)); renderDetail(); } };
     list.appendChild(c);
     const sq = seqSource(topic), gaps = sq && seqGaps(sq, from, to);
-    if (t.numeric) drawChart(c.querySelector(".dchart"), [topic], from, to, 110, (f, tt) => { win.set(f, tt); renderDetail(); }, gaps ? gaps.gaps.map((g) => g.at) : []);
+    if (t.numeric && spcOn.has(topic)) drawSpc(c.querySelector(".dchart"), topic, from, to, renderDetail);
+    else if (t.numeric) drawChart(c.querySelector(".dchart"), [topic], from, to, 110, (f, tt) => { win.set(f, tt); renderDetail(); }, gaps ? gaps.gaps.map((g) => g.at) : []);
     else drawStates(c.querySelector(".dchart"), [topic], from, to);
     if (gaps) c.querySelector(".dchart").insertAdjacentHTML("afterend", gapSummaryHtml(gaps));
     c.querySelector(".dchart").after(zoomControls(win, renderDetail, true));
@@ -1593,6 +1765,7 @@ const SUGGESTIONS = [
   "Which motors are running hottest right now?",
   "Have we missed any filler counter messages in the last hour?",
   "Is a network latency drift coming, and how well has it been predicted?",
+  "Run SPC on the filler fill weights: are they in control, and what is the Cpk?",
 ];
 let turns = [];
 let sample = null, sampleChecked = false, busy = false, ctl = null;
@@ -1601,7 +1774,7 @@ function instructions() {
   const topics = [...store.values()].sort((a, b) => a.topic.localeCompare(b.topic)).map((t) => `${t.topic}${t.unit ? ` [${t.unit}]` : ""}${t.numeric ? "" : " (text)"}`).join("\n");
   return `You are the assistant inside an MQTT broker dashboard. Answer questions about what is happening on the broker now and over the recorded history (up to 180 minutes), using the tools to read real data. Never invent values; if the data doesn't show something, say so.
 
-The broker is a Unified Namespace laid out to ISA-95: enterprise/site/area/line/cell/tag. It is a simulated food and beverage plant (packaging lines, mixers, an oven, CIP and utilities) running in the browser, with faults injected now and then. Some topics carry nested JSON documents (MES work orders per line, mixer batch records, a palletizer robot, boiler diagnostics). Each document is split into field topics at <document topic>/<json path>, e.g. acme/dublin/utilities/boiler/diagnostics/drum/pressure, each with its own history: numeric fields work with get_history and get_stats, text fields with get_state_changes, and get_json_document returns a whole document. The filler counter documents (packaging/<line>/filler/counts) carry a seq number per message and some messages are lost on purpose; use check_sequence_gaps for questions about missed or dropped data. Each area (packaging, processing, utilities) has network tags under <area>/network/ (latency_ms around 2500 ms that drifts to ~9000 ms about every 10 minutes, plus jitter, packet loss, throughput, retransmits, link_state); a baseline predictor publishes <area>/network/prediction with a drift risk and its own track record. Use predict_network_drift for questions about network drift.
+The broker is a Unified Namespace laid out to ISA-95: enterprise/site/area/line/cell/tag. It is a simulated food and beverage plant (packaging lines, mixers, an oven, CIP and utilities) running in the browser, with faults injected now and then. Some topics carry nested JSON documents (MES work orders per line, mixer batch records, a palletizer robot, boiler diagnostics). Each document is split into field topics at <document topic>/<json path>, e.g. acme/dublin/utilities/boiler/diagnostics/drum/pressure, each with its own history: numeric fields work with get_history and get_stats, text fields with get_state_changes, and get_json_document returns a whole document. The filler counter documents (packaging/<line>/filler/counts) carry a seq number per message and some messages are lost on purpose; use check_sequence_gaps for questions about missed or dropped data. Each area (packaging, processing, utilities) has network tags under <area>/network/ (latency_ms around 2500 ms that drifts to ~9000 ms about every 10 minutes, plus jitter, packet loss, throughput, retransmits, link_state); a baseline predictor publishes <area>/network/prediction with a drift risk and its own track record. Use predict_network_drift for questions about network drift. Filler fill_weight (spec 495-505 g, target 500 g) has occasional special causes (mean shifts, drifts, extra variation); use spc_analysis for SPC, control limits, rule violations and Cp/Cpk.
 
 How to work:
 - Prefer get_stats and find_anomalies for broad questions, get_history for one signal, get_state_changes for states, alarms and batch phases. Use exact topic names from the list below.

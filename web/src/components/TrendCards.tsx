@@ -7,6 +7,7 @@ import { useTimeWindow } from "../useTimeWindow";
 import { HistoryChart } from "./HistoryChart";
 import { ZoomControls } from "./ZoomControls";
 import { JsonView } from "./JsonView";
+import { SpcChart } from "./SpcChart";
 import { StateTimeline } from "./StateTimeline";
 
 const RANGES = [
@@ -107,6 +108,7 @@ function GapSummary({ gaps, label }: { gaps: Gaps; label?: string }) {
 
 function TrendCard({ live, topic, onClose, onOpenTrends, onAsk, onOpen }: { live: Live; topic: string; onClose: () => void; onOpenTrends: () => void; onAsk: (text: string) => void; onOpen: (topic: string) => void }) {
   const win = useTimeWindow(15);
+  const [spc, setSpc] = useState(false);
   const gaps = useGaps(seqSource(live.topics, topic), win.from, win.to, win.live);
   const row = live.topics.get(topic);
   if (!row) return null;
@@ -128,7 +130,9 @@ function TrendCard({ live, topic, onClose, onOpenTrends, onAsk, onOpen }: { live
           ))}
         </div>
       </div>
-      {row.value != null ? (
+      {row.value != null && spc ? (
+        <SpcChart topic={topic} from={win.from} to={win.to} live={win.live} unit={row.unit} />
+      ) : row.value != null ? (
         <HistoryChart topics={[topic]} from={win.from} to={win.to} units={{ [topic]: row.unit }} live={win.live} height={110} onZoom={win.zoomTo} markers={gaps?.gaps.map((g) => g.at)} />
       ) : (
         <StateTimeline topics={[topic]} from={win.from} to={win.to} live={win.live} />
@@ -140,6 +144,11 @@ function TrendCard({ live, topic, onClose, onOpenTrends, onAsk, onOpen }: { live
           {row.rate.toFixed(0)} msg/min{row.source ? " · JSON field" : ""}
         </span>
         <span className="card-actions">
+          {row.value != null && (
+            <button className={`text-toggle ${spc ? "on" : ""}`} onClick={() => setSpc(!spc)} title="Statistical process control: control limits, rule violations and capability">
+              SPC
+            </button>
+          )}
           {row.source && (
             <button className="icon" onClick={() => onOpen(row.source!)} title="Show the raw JSON document" aria-label="Show the raw JSON document">
               <Braces size={13} />

@@ -165,3 +165,21 @@ export function isAlarm(row: TopicRow): boolean {
   if (row.topic.endsWith("/alarm/active")) return t !== "none" && t !== "";
   return BAD.test(t);
 }
+
+export type SpcChartType = "xbar-r" | "xbar-s" | "imr";
+export interface Spc {
+  chart: SpcChartType;
+  n: number;
+  every: number;
+  points: { ts: number; x: number; r: number | null; rules: number[] }[];
+  x: { cl: number; ucl: number; lcl: number; sigma: number };
+  r: { cl: number; ucl: number; lcl: number; label: string };
+  capability: { mean: number; sigmaWithin: number; sigmaOverall: number; cp: number | null; cpk: number | null; pp: number | null; ppk: number | null; outOfSpecPct: number | null; readings: number };
+  spec: { lsl?: number; usl?: number; target?: number };
+  violations: { ts: number; rule: number; text: string }[];
+}
+
+export async function getSpc(topic: string, from: number, to: number, chart: SpcChartType): Promise<Spc | null> {
+  const q = new URLSearchParams({ topic, from: String(from), to: String(to), chart });
+  return (await fetch(`/api/spc?${q}`)).json();
+}

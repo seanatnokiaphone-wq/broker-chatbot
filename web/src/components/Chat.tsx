@@ -25,6 +25,7 @@ const SUGGESTIONS = [
   "Which motors are running hottest right now?",
   "Have we missed any filler counter messages in the last hour?",
   "Is a network latency drift coming, and how well has it been predicted?",
+  "Run SPC on the filler fill weights: are they in control, and what is the Cpk?",
 ];
 
 function newSessionId() {

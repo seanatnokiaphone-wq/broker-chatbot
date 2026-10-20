@@ -106,6 +106,14 @@ Each area (packaging, processing, utilities) publishes network health under `acm
 
 It publishes `acme/dublin/<area>/network/prediction` (status Normal / Watch / Drift likely / Drifting, `drift_risk_pct`, `forecast_2m_ms`, `next_drift_due_s`, the reasons) and scores itself: drifts seen, predicted in advance (risk ≥ 60% within 10 minutes before onset), missed, false alarms and median lead time. Because it is an ordinary JSON document, the risk can be trended next to latency in the cards, and the chat has a `predict_network_drift` tool. Set `PREDICTOR=off` to disable it. In a 70-minute simulated run it flagged all 20 drifts with a median lead of 75 to 125 s and a few false alarms. It is a deliberately simple baseline to compare a trained model against.
 
+The simulator's random faults (and the demo's **Inject fault** menu) include network incidents: a drift that starts immediately with no early warning, a packet-loss storm that looks like a precursor but never becomes a drift (a false-alarm test), and a packaging link outage during which the network tags go quiet, the prediction reports No data, and filler counter messages are lost.
+
+## SPC charts
+
+Any numeric trend card has an **SPC** button that swaps the trend for a control chart over the card's time window (zoom and pan still apply): X̄-R (default), X̄-S or I-MR. X̄ charts use rational subgroups of 5 readings taken each minute; I-MR takes one reading every 10 s. The chart shows UCL, CL and LCL, marks points that break the Western Electric rules (beyond 3σ, 2 of 3 beyond 2σ, 4 of 5 beyond 1σ, 8 on one side, 6 trending, and range above its UCL), and lists capability (Cp, Cpk, Ppk, % out of spec) when the tag has spec limits.
+
+Filler `fill_weight` has spec 495 to 505 g with a 500 g target (set in `SPC_SPECS` in `server/src/spc.ts`; readings at 0 while the filler is stopped are ignored). It runs at σ ≈ 1 g, and every 12 to 30 minutes picks up a special cause: a step shift in the mean, a slow drift, or a burst of extra variation. `/api/spc?topic=&chart=` returns the chart data, and the chat has an `spc_analysis` tool ("Run SPC on the filler fill weights: are they in control, and what is the Cpk?").
+
 ## Things to ask
 
 - "Give me an overview of what's on the broker"
@@ -114,6 +122,7 @@ It publishes `acme/dublin/<area>/network/prediction` (status Normal / Watch / Dr
 - "Compare OEE for line 1 and line 2 over the last hour and chart it"
 - "Which motors are running hottest right now?"
 - "Is a network latency drift coming, and how well has it been predicted?"
+- "Run SPC on the filler fill weights: are they in control, and what is the Cpk?"
 
 ## Configuration
 
@@ -143,6 +152,7 @@ server/src
   broker.ts         Embedded aedes broker
   simulator/        Mock ISA-95 plant (162 tags + 12 JSON documents)
   predictor.ts      Baseline network-drift predictor
+  spc.ts            SPC charts, Western Electric rules, capability
 web/src
   App.tsx           Layout, status bar, topic detail
   components/       TopicGraph, Explorer, HistoryChart, Chat

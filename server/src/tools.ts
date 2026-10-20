@@ -2,6 +2,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { config } from "./config.js";
 import type { RecorderStatus } from "./recorder.js";
+import { RULES, spc, specFor } from "./spc.js";
 import type { Store, TopicInfo } from "./store.js";
 
 /** Tools that let Claude read the live topic tree and the recorded history. */
@@ -243,6 +244,70 @@ const definitions = [
           return { topic: t.topic, updated: iso(t.lastTs), prediction: doc };
         }),
       };
+    },
+  }),
+  def({
+    tool: {
+      name: "spc_analysis",
+      description:
+        "Statistical process control for numeric topics, e.g. acme/dublin/packaging/+/filler/fill_weight. Builds an X̄-R (default), X̄-S or I-MR chart over the window, with control limits, Western Electric rule violations (1: beyond 3σ, 2: 2 of 3 beyond 2σ, 3: 4 of 5 beyond 1σ, 4: 8 in a row one side, 5: 6 trending, 6: range above UCL) and capability (Cp, Cpk, Pp, Ppk, % out of spec) against spec limits. fill_weight has spec 495-505 g, target 500 g; pass lsl/usl/target for other tags. Use for SPC, 'is the process in control', capability or Cpk questions.",
+      input_schema: {
+        type: "object",
+        properties: {
+          filter: { type: "string", description: "Topic or MQTT filter." },
+          chart: { type: "string", enum: ["xbar-r", "xbar-s", "imr"] },
+          n: { type: "number", description: "Subgroup size 2-10 (default 5)." },
+          every: { type: "number", description: "Seconds between subgroups (default 60; I-MR default 10)." },
+          lsl: { type: "number" },
+          usl: { type: "number" },
+          target: { type: "number" },
+          ...windowProps,
+          max_violations: { type: "number", description: "Most recent violations to list per topic (default 10)." },
+        },
+        required: ["filter"],
+      },
+    },
+    schema: z.object({
+      filter: z.string(),
+      chart: z.enum(["xbar-r", "xbar-s", "imr"]).default("xbar-r"),
+      n: z.number().optional(),
+      every: z.number().positive().optional(),
+      lsl: z.number().optional(),
+      usl: z.number().optional(),
+      target: z.number().optional(),
+      ...Window,
+      max_violations: z.number().int().positive().max(50).default(10),
+    }),
+    run: ({ filter, chart, n, every, lsl, usl, target, max_violations, ...w }, { store }) => {
+      const { from, to } = resolveWindow(w);
+      const results = [];
+      for (const t of store.match(filter).filter((x) => x.lastValue != null).slice(0, 12)) {
+        const spec = specFor(t.topic);
+        const res = spc(store.values(t.topic, from, to), { ...spec, chart, n, every, lsl: lsl ?? spec.lsl, usl: usl ?? spec.usl, target: target ?? spec.target });
+        if (!res) {
+          results.push({ topic: t.topic, note: "Too few readings in this window." });
+          continue;
+        }
+        const c = res.capability;
+        const byRule: Record<string, number> = {};
+        for (const v of res.violations) byRule[`${v.rule}: ${v.text}`] = (byRule[`${v.rule}: ${v.text}`] ?? 0) + 1;
+        results.push({
+          topic: t.topic,
+          unit: t.unit,
+          chart: res.chart,
+          subgroupSize: res.n,
+          everySeconds: res.every,
+          subgroups: res.points.length,
+          status: res.violations.length ? "Out of control" : "In control",
+          limits: { x: { cl: r(res.x.cl), ucl: r(res.x.ucl), lcl: r(res.x.lcl) }, [res.r.label]: { cl: r(res.r.cl), ucl: r(res.r.ucl), lcl: r(res.r.lcl) } },
+          spec: { lsl: res.spec.lsl, target: res.spec.target, usl: res.spec.usl },
+          capability: { mean: r(c.mean), sigmaWithin: r(c.sigmaWithin), sigmaOverall: r(c.sigmaOverall), cp: r(c.cp, 2), cpk: r(c.cpk, 2), pp: r(c.pp, 2), ppk: r(c.ppk, 2), outOfSpecPct: r(c.outOfSpecPct, 2), readings: c.readings },
+          violationsByRule: byRule,
+          recentViolations: res.violations.slice(-max_violations).reverse().map((v) => ({ at: iso(v.ts), rule: v.rule, text: v.text, value: r(res.points.find((p) => p.ts === v.ts)?.x) })),
+        });
+      }
+      if (!results.length) return { note: "No numeric topics match that filter.", rules: RULES };
+      return { from: iso(from), to: iso(to), topics: results };
     },
   }),
   def({

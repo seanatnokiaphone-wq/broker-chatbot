@@ -208,3 +208,11 @@ button.icon:hover { color: var(--ink); background: var(--surface-2); }
   .graph-search { max-width: calc(100% - 24px); }
   .topbar { flex-wrap: wrap; gap: 10px; }
 }
+.spc { display: flex; flex-direction: column; gap: 2px; }
+.spc-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.spc .good, .spc-cap .good { color: var(--good); }
+.spc .bad, .spc-cap .bad { color: #e66767; }
+.spc-cap .warn { color: #e0a43a; }
+.spc-cap { display: flex; flex-wrap: wrap; gap: 4px 10px; padding-top: 2px; }
+.text-toggle { font-size: 11px; padding: 1px 7px; border-radius: 6px; border: 1px solid var(--line-2); background: transparent; color: var(--muted, #898781); }
+.text-toggle.on { border-color: var(--accent); color: var(--accent); }
