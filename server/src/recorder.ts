@@ -1,5 +1,6 @@
 import mqtt from "mqtt";
 import { brokerUrl, config } from "./config.js";
+import type { Influx } from "./influx.js";
 import type { Store } from "./store.js";
 
 export interface RecorderStatus {
@@ -10,8 +11,8 @@ export interface RecorderStatus {
   lastError?: string;
 }
 
-/** Subscribes to the broker and writes every message into the store. */
-export function startRecorder(store: Store) {
+/** Subscribes to the broker and writes every message into the store, and into InfluxDB when configured. */
+export function startRecorder(store: Store, influx?: Influx | null) {
   const url = brokerUrl();
   const status: RecorderStatus = { url, connected: false, subscriptions: config.subscribe, since: null };
   const client = mqtt.connect(url, {
@@ -35,7 +36,10 @@ export function startRecorder(store: Store) {
     status.lastError = err.message;
     console.warn(`[recorder] ${err.message}`);
   });
-  client.on("message", (topic, payload, packet) => store.record(topic, payload, packet.retain));
+  client.on("message", (topic, payload, packet) => {
+    store.record(topic, payload, packet.retain);
+    influx?.write(topic, payload);
+  });
 
   return { status, client };
 }

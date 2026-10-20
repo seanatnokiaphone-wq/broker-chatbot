@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.135.0",
+    "@influxdata/influxdb-client": "^1.35.0",
     "aedes": "^1.2.0",
     "better-sqlite3": "^13.0.3",
     "express": "^5.3.0",

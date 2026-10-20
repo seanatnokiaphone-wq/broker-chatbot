@@ -9,8 +9,9 @@ Chat with a live MQTT broker. Ask questions about what's happening right now or 
 
 ```
 ┌───────────────┐   MQTT    ┌──────────────────────────── server ─────────────────────────────┐
-│ UNS simulator │──────────▶│ broker (embedded aedes, or yours) ─▶ recorder ─▶ SQLite (3 h)   │
-└───────────────┘           │                                        │                         │
+│ UNS simulator │──────────▶│ broker (embedded aedes, or yours) ─▶ recorder ─┬▶ SQLite (3 h)  │
+└───────────────┘           │                                                └▶ InfluxDB (opt) │
+                            │                                        │                         │
                             │                     REST + WebSocket ◀─┴─▶ Claude tool loop      │
                             └──────────────────────────────┬──────────────────────────────────┘
                                                            ▼
@@ -41,6 +42,35 @@ echo "MQTT_URL=mqtt://localhost:1883" >> .env
 npm run dev
 ```
 
+### Also storing to InfluxDB 2.x
+
+SQLite keeps the rolling 3 hours the assistant reads from. To keep longer history for Grafana or Flux queries, the recorder can also write every message to InfluxDB 2.x:
+
+```bash
+docker compose up -d influxdb     # org "acme", bucket "uns" (30 day retention), token "broker-chatbot-dev-token"
+cat >> .env <<'ENV'
+INFLUX_URL=http://localhost:8086
+INFLUX_TOKEN=broker-chatbot-dev-token
+INFLUX_ORG=acme
+INFLUX_BUCKET=uns
+ENV
+npm run dev
+```
+
+Each message becomes one point in the `uns` measurement:
+
+- **Tags:** `topic`, the ISA-95 levels from the path (`enterprise`, `site`, `area`, `line`, `cell`), the last segment as `tag`, plus `unit` and `quality` when the payload has them.
+- **Fields:** `value` (float) for numeric and boolean payloads, otherwise `state` (string), e.g. `Running`.
+
+```flux
+from(bucket: "uns")
+  |> range(start: -1h)
+  |> filter(fn: (r) => r._measurement == "uns" and r.line == "line1" and r.tag == "motor_temp")
+  |> aggregateWindow(every: 1m, fn: mean)
+```
+
+Writes are batched (flushed every second, up to 50k points buffered with retries), so an Influx outage never blocks recording. Write counts and the last error show under `influx` in `/api/status`. Change the compose password and token before using it anywhere shared.
+
 ## Things to ask
 
 - "Give me an overview of what's on the broker"
@@ -60,6 +90,8 @@ npm run dev
 | `RETENTION_MINUTES` | `180` | How much history to keep |
 | `PORT` | `8787` | API port (Vite proxies `/api` and `/ws` to it) |
 | `DB_PATH` | `../data/history.db` | SQLite file, relative to `server/` |
+| `INFLUX_URL`, `INFLUX_TOKEN`, `INFLUX_ORG`, `INFLUX_BUCKET` | | Also write every message to InfluxDB 2.x (all four required) |
+| `INFLUX_MEASUREMENT` | `uns` | Influx measurement name |
 
 ## Layout
 
@@ -68,6 +100,7 @@ server/src
   index.ts          HTTP API, SSE chat endpoint, WebSocket live feed
   recorder.ts       MQTT subscriber → store
   store.ts          SQLite history, topic tree, throughput
+  influx.ts         Optional InfluxDB 2.x writer
   tools.ts          Claude tool definitions and handlers
   chat.ts           Streaming tool-use loop
   broker.ts         Embedded aedes broker
@@ -91,5 +124,5 @@ npm start -w server   # serves the built UI from web/dist on PORT
 
 ## Notes
 
-- At about 40 msg/s the mock plant writes roughly 430k rows per 3 hours, which SQLite handles comfortably. For much busier brokers, swap `store.ts` for TimescaleDB or InfluxDB; the tools only depend on its `history`, `stats`, `changes` and `values` methods.
+- At about 40 msg/s the mock plant writes roughly 430k rows per 3 hours, which SQLite handles comfortably. For much busier brokers, swap `store.ts` for TimescaleDB or the InfluxDB bucket; the tools only depend on its `history`, `stats`, `changes` and `values` methods.
 - Payloads are parsed as plain numbers, booleans, or JSON with a `value` field (plus optional `unit` and `quality`). Anything else is stored as text and is still searchable through state changes and latest values.

@@ -7,12 +7,14 @@ import { WebSocketServer, WebSocket } from "ws";
 import { startEmbeddedBroker } from "./broker.js";
 import { chat, resetSession, type ChatEvent } from "./chat.js";
 import { config } from "./config.js";
+import { startInflux } from "./influx.js";
 import { startRecorder } from "./recorder.js";
 import { Store, type TopicInfo } from "./store.js";
 
 const embedded = config.mqttUrl ? null : await startEmbeddedBroker(config.embeddedPort);
 const store = new Store(config.dbPath, config.retentionMinutes);
-const recorder = startRecorder(store);
+const influx = startInflux();
+const recorder = startRecorder(store, influx);
 
 const app = express();
 app.use(express.json());
@@ -31,6 +33,7 @@ app.get("/api/status", (_req, res) => {
     totalMessages: store.totalMessages,
     historyFrom: store.oldestTs(),
     retentionMinutes: config.retentionMinutes,
+    influx: influx ? { ...influx.status, enabled: true } : { enabled: false },
     model: config.model,
     chatEnabled: !!(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN),
   });
@@ -102,3 +105,11 @@ setInterval(() => {
 server.listen(config.port, () => {
   console.log(`[server] API on http://localhost:${config.port}, recording ${recorder.status.url}`);
 });
+
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.once(sig, async () => {
+    recorder.client.end();
+    await influx?.close();
+    process.exit(0);
+  });
+}
