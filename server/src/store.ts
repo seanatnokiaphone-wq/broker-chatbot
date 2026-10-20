@@ -28,6 +28,8 @@ export interface Parsed {
 }
 
 const MAX_PAYLOAD = 2048;
+/** JSON documents are kept whole (up to this size) so the UI can show the raw message. */
+const MAX_DOC_PAYLOAD = 16_384;
 
 /** Pulls a numeric value (and unit/quality, if present) out of common payload shapes. */
 export function parsePayload(raw: string): Parsed {
@@ -158,7 +160,7 @@ export class Store {
     const ts = Date.now();
     const raw = payload.toString("utf8");
     const fields = flattenJson(raw);
-    this.recordOne(topic, raw.slice(0, MAX_PAYLOAD), ts, retained);
+    this.recordOne(topic, raw.slice(0, fields ? MAX_DOC_PAYLOAD : MAX_PAYLOAD), ts, retained);
     if (fields) {
       this.topics.get(topic)!.doc = true;
       for (const [path, text] of fields) {

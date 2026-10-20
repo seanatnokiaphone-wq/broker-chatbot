@@ -81,6 +81,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .card-foot .btn.mini { padding: 2px 8px; font-size: 11px; }
 .card .state-timeline { padding: 4px 0; gap: 6px; }
 .card .st-label { display: none; }
+.json-view { margin: 4px 0; padding: 8px 10px; background: var(--page); border: 1px solid var(--line); border-radius: 8px; font-family: "IBM Plex Mono", monospace; font-size: 11.5px; line-height: 1.45; color: var(--ink-2); max-height: 340px; overflow: auto; white-space: pre; }
+.json-view .j-key { color: #9ec5f4; } .json-view .j-str { color: #8fd3b6; } .json-view .j-num { color: #f0c674; } .json-view .j-lit { color: #e598b8; }
 @media (max-width: 900px) { #view-graph:not([hidden]) { flex-direction: column; } .cards { width: auto; max-height: 45%; border-left: none; border-top: 1px solid var(--line); } }
 
 /* Graph */
@@ -1004,7 +1006,7 @@ function nodeAt(ev) {
   const [gx, gy] = transform.invert([px, py]);
   if (layout === "force") return sim.find(gx, gy, 12 / transform.k);
   // Hit the dot or its label row
-  return nodes.find((n) => visible(n) && Math.abs(gy - n.ty) < ROW / 2 - 1 && gx > n.tx - 10 && gx < n.tx + (n.leaf ? 250 : COL - 30)) || null;
+  return nodes.find((n) => visible(n) && Math.abs(gy - n.ty) < ROW / 2 - 1 && gx > n.tx - 10 && gx < n.tx + (n.leaf ? 250 : COL - 10)) || null;
 }
 canvas.addEventListener("pointermove", (ev) => {
   const n = nodeAt(ev);
@@ -1016,8 +1018,11 @@ canvas.addEventListener("pointerleave", () => { hover = null; renderHover(); });
 canvas.addEventListener("click", (ev) => {
   const n = nodeAt(ev);
   if (!n) return;
-  if (n.leaf) openCard(n.id);
-  else if (layout === "tree") { treeCollapsed.has(n.id) ? treeCollapsed.delete(n.id) : treeCollapsed.add(n.id); layoutTree(); }
+  if (n.leaf) return openCard(n.id);
+  if (layout === "force") { if (docs.has(n.id)) openCard(n.id); return; } // a JSON document opens its raw JSON card
+  const [gx] = transform.invert(d3.pointer(ev, canvas));
+  if (n.rawX && gx >= n.rawX[0] && gx <= n.rawX[1]) return openCard(n.id);
+  treeCollapsed.has(n.id) ? treeCollapsed.delete(n.id) : treeCollapsed.add(n.id); layoutTree();
 });
 
 function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x, y, w, h, r) : ctx.rect(x, y, w, h); }
@@ -1090,10 +1095,18 @@ function drawTreeLabel(n, t, alarm, r) {
     roundRect(x, y - 8, bw, 16, 4); ctx.fillStyle = "#1d2125"; ctx.fill(); ctx.strokeStyle = "#343a41"; ctx.lineWidth = 1 / transform.k; ctx.stroke();
     ctx.fillStyle = n.json ? JSON_COLOR : LEVELS[Math.min(n.depth, 4)] === "#eceeef" ? "#b9bfc5" : LEVELS[Math.min(n.depth, 4)];
     ctx.fillText(badge, x + 5, y + 0.5);
+    let cx = x + bw + 8;
+    if (docs.has(n.id)) { // "{ }" link that opens the raw JSON card
+      ctx.font = `500 11px "IBM Plex Mono", monospace`; ctx.fillStyle = JSON_COLOR;
+      const w = ctx.measureText("{ }").width;
+      ctx.fillText("{ }", cx, y + 0.5);
+      n.rawX = [cx - 3, cx + w + 3];
+      cx += w + 8;
+    }
     if (treeCollapsed.has(n.id) && !keep) {
       const count = nodes.filter((m) => m.leaf && m.id.startsWith(n.id + "/")).length;
       ctx.fillStyle = "#7f878f"; ctx.font = `400 11px "IBM Plex Sans", sans-serif`;
-      ctx.fillText(`▸ ${count} tags`, x + bw + 8, y + 0.5);
+      ctx.fillText(`▸ ${count} tags`, cx, y + 0.5);
     }
   } else {
     ctx.font = `400 12.5px "IBM Plex Mono", monospace`;
@@ -1144,32 +1157,57 @@ const cardRange = new Map();
 const MAX_CARDS = 8;
 function openCard(topic) { cards = [topic, ...cards.filter((c) => c !== topic)].slice(0, MAX_CARDS); renderDetail(); }
 function addToTrends(topics) { picked = [...new Set([...picked, ...topics])].slice(-6); showTab("explorer"); renderTrend(); syncTree(); }
+const escHtml = (x) => String(x).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+/** Pretty-printed, syntax-coloured JSON as HTML. */
+function jsonHtml(obj) {
+  return escHtml(JSON.stringify(obj, null, 2)).replace(/(&quot;(?:\\.|(?!&quot;).)*?&quot;)(\s*:)?|\b(true|false|null)\b|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
+    (m, str, colon, lit, num) => (str ? `<span class="${colon ? "j-key" : "j-str"}">${str}</span>${colon || ""}` : `<span class="${lit ? "j-lit" : "j-num"}">${m}</span>`));
+}
+/** Card with the whole latest message of a JSON document topic. */
+function rawCard(topic) {
+  const d = docs.get(topic), fields = [...store.values()].filter((t) => t.source === topic).length;
+  const updated = Date.parse(d.timestamp);
+  const c = document.createElement("div");
+  c.className = "card";
+  c.innerHTML = `<div class="card-head"><div class="mono small"></div><button class="icon-btn" data-a="close" aria-label="Close card">✕</button></div>
+    <div class="small muted">{ } Raw JSON · ${fields} fields · updated ${Math.max(0, Math.round((Date.now() - updated) / 1000))} s ago</div>
+    <pre class="json-view">${jsonHtml(d)}</pre>
+    <div class="card-foot"><span class="small muted">${ratePerMin(store.get([...store.keys()].find((k) => k.startsWith(topic + "/"))))} msg/min</span><span class="btns"><button class="btn mini" data-a="copy">Copy</button> <button class="btn mini" data-a="ask">Ask</button></span></div>`;
+  c.querySelector(".mono").textContent = topic.split("/").slice(-3).join("/");
+  c.querySelector(".mono").title = topic;
+  c.querySelector('[data-a="close"]').onclick = () => { cards = cards.filter((x) => x !== topic); renderDetail(); };
+  c.querySelector('[data-a="copy"]').onclick = (e) => { navigator.clipboard?.writeText(JSON.stringify(docs.get(topic), null, 2)).then(() => { e.target.textContent = "Copied"; setTimeout(() => (e.target.textContent = "Copy"), 1500); }).catch(() => {}); };
+  c.querySelector('[data-a="ask"]').onclick = () => { $("input").value = `Summarise the latest ${topic} document and anything unusual in it.`; $("input").focus(); };
+  return c;
+}
 function renderDetail() {
   const el = $("cards");
-  cards = cards.filter((c) => store.has(c));
+  cards = cards.filter((c) => store.has(c) || docs.has(c));
   const wasHidden = el.hidden;
   el.hidden = !cards.length;
   if (wasHidden !== el.hidden) { resizeCanvas(); }
   if (!cards.length) return;
   const scroll = el.querySelector(".cards-scroll")?.scrollTop ?? 0;
   el.innerHTML = `<div class="cards-head"><span class="small muted">${cards.length === 1 ? "1 card" : cards.length + " cards"}</span><span class="btns"><button class="btn" data-a="all">Compare all</button><button class="btn" data-a="clear">Clear</button></span></div><div class="cards-scroll"></div>`;
-  el.querySelector('[data-a="all"]').onclick = () => addToTrends(cards);
+  el.querySelector('[data-a="all"]').onclick = () => addToTrends(cards.filter((c) => store.has(c)));
   el.querySelector('[data-a="clear"]').onclick = () => { cards = []; renderDetail(); };
   const list = el.querySelector(".cards-scroll");
   for (const topic of cards) {
+    if (docs.has(topic)) { list.appendChild(rawCard(topic)); continue; }
     const t = store.get(topic), min = cardRange.get(topic) ?? 15;
     const c = document.createElement("div");
     c.className = "card";
     c.innerHTML = `<div class="card-head"><div class="mono small"></div><button class="icon-btn" data-a="close" aria-label="Close card">✕</button></div>
       <div class="card-row"><div class="v ${isAlarm(t) ? "bad" : ""}"></div><div class="seg">${[15, 60, 180].map((m) => `<button data-m="${m}" aria-pressed="${m === min}">${m < 60 ? m + "m" : m / 60 + "h"}</button>`).join("")}</div></div>
       <div class="dchart"></div>
-      <div class="card-foot"><span class="small muted"></span><span class="btns"><button class="btn mini" data-a="trend">Trends</button> <button class="btn mini" data-a="ask">Ask</button></span></div>`;
+      <div class="card-foot"><span class="small muted"></span><span class="btns">${t.source ? '<button class="btn mini" data-a="raw" title="Show the raw JSON document">{ }</button> ' : ""}<button class="btn mini" data-a="trend">Trends</button> <button class="btn mini" data-a="ask">Ask</button></span></div>`;
     c.querySelector(".mono").textContent = topic.split("/").slice(-3).join("/");
     c.querySelector(".mono").title = topic;
     c.querySelector(".v").textContent = fmt(t);
     c.querySelector(".card-foot .muted").textContent = `${ratePerMin(t)} msg/min${t.source ? " · JSON field" : ""}`;
     c.querySelector('[data-a="close"]').onclick = () => { cards = cards.filter((x) => x !== topic); renderDetail(); };
     c.querySelector('[data-a="trend"]').onclick = () => addToTrends([topic]);
+    if (t.source) c.querySelector('[data-a="raw"]').onclick = () => openCard(t.source);
     c.querySelector('[data-a="ask"]').onclick = () => { $("input").value = `What has ${topic} been doing over the last hour?`; $("input").focus(); };
     c.querySelector(".seg").onclick = (e) => { const b = e.target.closest("button"); if (b) { cardRange.set(topic, Number(b.dataset.m)); renderDetail(); } };
     list.appendChild(c);

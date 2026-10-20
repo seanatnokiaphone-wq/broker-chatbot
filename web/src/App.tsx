@@ -114,6 +114,7 @@ export default function App() {
                 onClear={() => setCards([])}
                 onOpenTrends={(ts) => (setChartTopics((cur) => [...new Set([...cur, ...ts])].slice(-6)), setView("explorer"))}
                 onAsk={setDraft}
+                onOpen={openCard}
               />
             </div>
           ) : (

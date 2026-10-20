@@ -20,7 +20,7 @@ const app = express();
 app.use(express.json());
 
 const topicRow = (t: TopicInfo) => ({
-  topic: t.topic, value: t.lastValue, payload: t.lastPayload.slice(0, 300), unit: t.unit,
+  topic: t.topic, value: t.lastValue, payload: t.doc ? t.lastPayload : t.lastPayload.slice(0, 300), unit: t.unit,
   lastTs: t.lastTs, rate: Math.round(t.rate * 10) / 10, count: t.count,
   ...(t.doc ? { doc: true } : t.source ? { source: t.source } : {}),
 });

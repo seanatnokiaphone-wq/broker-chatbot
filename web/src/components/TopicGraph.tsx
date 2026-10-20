@@ -118,7 +118,10 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
         linkWidth={1}
         nodeRelSize={4}
         onNodeHover={(n) => setHover(n?.leaf ? (n.id as string) : null)}
-        onNodeClick={(n) => (n.leaf ? onSelect(n.id as string) : fg.current?.centerAt(n.x, n.y, 600))}
+        onNodeClick={(n) => {
+          if (n.leaf || live.topics.get(n.id as string)?.doc) onSelect(n.id as string); // a JSON document opens its raw JSON card
+          if (!n.leaf) fg.current?.centerAt(n.x, n.y, 600);
+        }}
         nodeCanvasObject={(n, ctx, scale) => {
           const row = live.topics.get(n.id as string);
           const dim = hits ? !hits.lit.has(n.id as string) : false;

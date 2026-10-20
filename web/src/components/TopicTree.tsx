@@ -170,6 +170,19 @@ export function TopicTree({ live, selected, onSelect }: Props) {
                     <tspan dx={8} className="badge" style={color === LEVELS[0] ? undefined : { fill: color }}>
                       {n.json ? "JSON" : LEVEL_BADGE[Math.min(n.depth, 4)]}
                     </tspan>
+                    {live.topics.get(n.id)?.doc && (
+                      <tspan
+                        dx={8}
+                        className="raw-link"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelect(n.id);
+                        }}
+                      >
+                        <title>Show the raw JSON</title>
+                        {"{ }"}
+                      </tspan>
+                    )}
                     {folded && !keep && <tspan dx={8} className="count">▸ {tagCount(n)} tags</tspan>}
                   </text>
                 )}
