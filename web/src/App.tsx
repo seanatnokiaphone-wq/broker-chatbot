@@ -7,6 +7,7 @@ import { Chat } from "./components/Chat";
 import { Explorer } from "./components/Explorer";
 import { HistoryChart } from "./components/HistoryChart";
 import { TopicGraph } from "./components/TopicGraph";
+import { TopicTree } from "./components/TopicTree";
 import { useLive } from "./useLive";
 
 type View = "graph" | "explorer";
@@ -15,6 +16,7 @@ export default function App() {
   const live = useLive();
   const [status, setStatus] = useState<Status | null>(null);
   const [view, setView] = useState<View>("graph");
+  const [graphLayout, setGraphLayout] = useState<"network" | "tree">("network");
   const [selected, setSelected] = useState<string | null>(null);
   const [chartTopics, setChartTopics] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
@@ -79,10 +81,24 @@ export default function App() {
             <button className={view === "explorer" ? "on" : ""} onClick={() => setView("explorer")}>
               <Rows3 size={14} /> Explorer & trends
             </button>
+            {view === "graph" && (
+              <div className="segmented layout-toggle" aria-label="Graph layout">
+                <button className={graphLayout === "network" ? "on" : ""} onClick={() => setGraphLayout("network")}>
+                  Network
+                </button>
+                <button className={graphLayout === "tree" ? "on" : ""} onClick={() => setGraphLayout("tree")}>
+                  Tree →
+                </button>
+              </div>
+            )}
           </nav>
           {view === "graph" ? (
             <div className="graph-view">
-              <TopicGraph live={live} selected={selected} onSelect={setSelected} />
+              {graphLayout === "network" ? (
+                <TopicGraph live={live} selected={selected} onSelect={setSelected} />
+              ) : (
+                <TopicTree live={live} selected={selected} onSelect={setSelected} />
+              )}
               {sel && (
                 <div className="detail">
                   <div className="detail-head">

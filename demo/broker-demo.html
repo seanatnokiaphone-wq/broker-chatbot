@@ -57,7 +57,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tabs { display: flex; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--line); align-items: center; }
 .tabs button { display: flex; align-items: center; gap: 6px; background: none; border: 1px solid transparent; border-radius: 8px; padding: 6px 10px; color: var(--muted); }
 .tabs button[aria-selected="true"] { background: var(--raised); border-color: var(--line-2); color: var(--ink); }
+.tabs { flex-wrap: wrap; }
 .tabs .hint { margin-left: auto; font-size: 12px; color: var(--muted); }
+.graph-tools { display: flex; gap: 8px; align-items: center; }
+#tree-tools { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.search.tree-filter { margin: 0; padding: 4px 8px; width: 250px; max-width: 100%; }
 .view { flex: 1; min-height: 0; position: relative; }
 
 /* Graph */
@@ -186,6 +190,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
         <button role="tab" id="tab-graph" aria-selected="true">◉ Topic graph</button>
         <button role="tab" id="tab-explorer" aria-selected="false">☰ Explorer &amp; trends</button>
         <span class="hint" id="tab-hint">Drag to pan, scroll to zoom, click a tag for details</span>
+        <div class="graph-tools" id="graph-tools">
+          <div class="seg" id="layout" aria-label="Graph layout">
+            <button data-l="force" aria-pressed="true">Network</button>
+            <button data-l="tree" aria-pressed="false">Tree →</button>
+          </div>
+          <span id="tree-tools" hidden><label class="search tree-filter"><span aria-hidden="true">⌕</span><input id="tree-filter" placeholder="Filter: temp, line2, Down, +/+/+/+/+/motor_temp" aria-label="Filter tree"></label><span class="small muted" id="tree-count"></span><button class="btn" id="expand-all">Expand all</button> <button class="btn" id="collapse-all">Collapse all</button></span>
+        </div>
       </nav>
       <div class="view" id="view-graph">
         <canvas id="graph"></canvas>
@@ -744,13 +755,15 @@ const LEVEL_NAMES = ["Enterprise", "Site", "Area", "Line / unit", "Cell", "Tag"]
 $("legend").innerHTML = LEVEL_NAMES.map((n, i) => `<span><i style="background:${LEVELS[i]}"></i>${n}</span>`).join("") + `<span><i style="background:var(--critical)"></i>Alarm / down</span>`;
 const canvas = $("graph"), ctx = canvas.getContext("2d");
 let selected = null, hover = null, transform = d3.zoomIdentity, W = 800, H = 600;
+let layout = "force"; // "force" | "tree"
 const nodes = [], links = [], byId = new Map();
 for (const topic of [...store.keys()].sort()) {
   const parts = topic.split("/");
   parts.forEach((name, i) => {
     const id = parts.slice(0, i + 1).join("/");
     if (!byId.has(id)) {
-      const n = { id, name, depth: i, leaf: false };
+      const n = { id, name, depth: i, leaf: false, parent: i > 0 ? byId.get(parts.slice(0, i).join("/")) : null, kids: [] };
+      n.parent?.kids.push(n);
       byId.set(id, n); nodes.push(n);
       if (i > 0) links.push({ source: parts.slice(0, i).join("/"), target: id });
     }
@@ -764,6 +777,44 @@ const sim = d3.forceSimulation(nodes)
   .force("collide", d3.forceCollide((d) => (d.leaf ? 4 : 10)));
 for (let i = 0; i < 300; i++) sim.tick();
 sim.alpha(0.05);
+for (const n of nodes) { n.dx = n.x; n.dy = n.y; n.op = 1; }
+
+/* Left-to-right tree: ISA-95 levels as columns, collapsible branches. */
+const ROW = 24, COL = 165;
+const treeCollapsed = new Set(nodes.filter((n) => !n.leaf && n.depth >= 4).map((n) => n.id)); // cells start folded
+// Filter: topic path or current value contains the text (or matches an MQTT filter with + / #).
+// While a filter is set, matching branches open automatically and everything else is hidden.
+let treeFilter = "", keep = null;
+function computeKeep() {
+  const f = treeFilter.trim().toLowerCase();
+  if (!f) { keep = null; return; }
+  const wild = /[+#]/.test(f);
+  keep = new Set();
+  for (const n of nodes) {
+    if (!n.leaf) continue;
+    const t = store.get(n.id);
+    const hit = wild ? mqttMatch(f, n.id.toLowerCase()) : n.id.toLowerCase().includes(f) || String(lastOf(t).value).toLowerCase().includes(f);
+    if (hit) for (let p = n; p; p = p.parent) keep.add(p.id);
+  }
+}
+const hiddenIn = (n) => {
+  if (keep && !keep.has(n.id)) { let p = n.parent; while (p && !keep.has(p.id)) p = p.parent; return p || nodes[0]; }
+  if (keep) return null;
+  for (let p = n.parent; p; p = p.parent) if (treeCollapsed.has(p.id)) return p;
+  return null;
+};
+function layoutTree() {
+  const root = d3.hierarchy(nodes[0], (n) => (keep ? n.kids.filter((k) => keep.has(k.id)) : treeCollapsed.has(n.id) ? null : n.kids));
+  // Cluster layout puts every tag in the last column, so tag labels never run into the next level.
+  d3.cluster().nodeSize([ROW, COL]).separation((a, b) => (a.parent === b.parent ? 1 : 1.4))(root);
+  const placed = new Set();
+  root.each((h) => { h.data.tx = h.y; h.data.ty = h.x; placed.add(h.data); });
+  for (const n of nodes) if (!placed.has(n)) { let a = hiddenIn(n); while (a && !placed.has(a)) a = hiddenIn(a) || a.parent; a = a || nodes[0]; n.tx = a.tx; n.ty = a.ty; }
+}
+layoutTree();
+const levelOf = (n) => (n.leaf ? "Tag" : ["Enterprise", "Site", "Area", "Line", "Cell"][Math.min(n.depth, 4)]);
+const visible = (n) => layout === "force" || !hiddenIn(n);
+
 function resizeCanvas() {
   const r = canvas.getBoundingClientRect(); if (!r.width) return;
   W = r.width; H = r.height;
@@ -772,18 +823,38 @@ function resizeCanvas() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 function fitGraph() {
-  const xs = d3.extent(nodes, (n) => n.x), ys = d3.extent(nodes, (n) => n.y);
-  const k = Math.min(W / (xs[1] - xs[0] + 80), H / (ys[1] - ys[0] + 80), 4);
-  transform = d3.zoomIdentity.translate(W / 2 - k * (xs[0] + xs[1]) / 2, H / 2 - k * (ys[0] + ys[1]) / 2).scale(k);
+  if (layout === "tree") {
+    const vis = nodes.filter(visible);
+    if (!vis.length) return;
+    const xs = d3.extent(vis, (n) => n.tx), ys = d3.extent(vis, (n) => n.ty);
+    // Fit the width (staying readable) and start at the top; scroll for the rest.
+    const k = Math.max(0.8, Math.min(1.1, (W - 40) / (xs[1] - xs[0] + 260)));
+    const y0 = ys[1] - ys[0] + 40 < H / k ? H / 2 - k * (ys[0] + ys[1]) / 2 : 24 - k * ys[0];
+    transform = d3.zoomIdentity.translate(24 - k * xs[0], y0).scale(k);
+  } else {
+    const xs = d3.extent(nodes, (n) => n.x), ys = d3.extent(nodes, (n) => n.y);
+    const k = Math.min(W / (xs[1] - xs[0] + 80), H / (ys[1] - ys[0] + 80), 4);
+    transform = d3.zoomIdentity.translate(W / 2 - k * (xs[0] + xs[1]) / 2, H / 2 - k * (ys[0] + ys[1]) / 2).scale(k);
+  }
   d3.select(canvas).call(zoom.transform, transform);
 }
-const zoom = d3.zoom().scaleExtent([0.3, 8]).on("zoom", (ev) => { transform = ev.transform; });
+// In tree mode the wheel scrolls (ctrl/⌘ + wheel zooms); in force mode it zooms.
+const zoom = d3.zoom().scaleExtent([0.3, 8])
+  .filter((ev) => (ev.type === "wheel" ? layout === "force" || ev.ctrlKey || ev.metaKey : !ev.button))
+  .on("zoom", (ev) => { transform = ev.transform; });
 d3.select(canvas).call(zoom).on("dblclick.zoom", null);
+canvas.addEventListener("wheel", (ev) => {
+  if (layout !== "tree" || ev.ctrlKey || ev.metaKey) return;
+  ev.preventDefault();
+  d3.select(canvas).call(zoom.translateBy, -ev.deltaX / transform.k, -ev.deltaY / transform.k);
+}, { passive: false });
+
 function nodeAt(ev) {
   const [px, py] = d3.pointer(ev, canvas);
   const [gx, gy] = transform.invert([px, py]);
-  const n = sim.find(gx, gy, 12 / transform.k);
-  return n;
+  if (layout === "force") return sim.find(gx, gy, 12 / transform.k);
+  // Hit the dot or its label row
+  return nodes.find((n) => visible(n) && Math.abs(gy - n.ty) < ROW / 2 - 1 && gx > n.tx - 10 && gx < n.tx + (n.leaf ? 250 : COL - 30)) || null;
 }
 canvas.addEventListener("pointermove", (ev) => {
   const n = nodeAt(ev);
@@ -792,41 +863,115 @@ canvas.addEventListener("pointermove", (ev) => {
   renderHover();
 });
 canvas.addEventListener("pointerleave", () => { hover = null; renderHover(); });
-canvas.addEventListener("click", (ev) => { const n = nodeAt(ev); if (n?.leaf) { selected = n.id; renderDetail(); } });
+canvas.addEventListener("click", (ev) => {
+  const n = nodeAt(ev);
+  if (!n) return;
+  if (n.leaf) { selected = n.id; renderDetail(); }
+  else if (layout === "tree") { treeCollapsed.has(n.id) ? treeCollapsed.delete(n.id) : treeCollapsed.add(n.id); layoutTree(); }
+});
+
+function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x, y, w, h, r) : ctx.rect(x, y, w, h); }
 function drawGraph() {
   if (!W) return;
   const now = Date.now();
+  const tree = layout === "tree";
+  // Ease displayed positions toward the active layout's targets
+  for (const n of nodes) {
+    const tx = tree ? n.tx : n.x, ty = tree ? n.ty : n.y;
+    n.dx += (tx - n.dx) * 0.18; n.dy += (ty - n.dy) * 0.18;
+    n.op += ((visible(n) ? 1 : 0) - n.op) * 0.2;
+  }
   ctx.clearRect(0, 0, W, H);
   ctx.save();
   ctx.translate(transform.x, transform.y); ctx.scale(transform.k, transform.k);
-  ctx.strokeStyle = "#262b30"; ctx.lineWidth = 1 / transform.k;
-  ctx.beginPath();
-  for (const l of links) { ctx.moveTo(l.source.x, l.source.y); ctx.lineTo(l.target.x, l.target.y); }
-  ctx.stroke();
+  ctx.lineWidth = 1 / transform.k;
+  for (const l of links) {
+    const a = l.source, b = l.target;
+    if (b.op < 0.02) continue;
+    ctx.globalAlpha = b.op;
+    ctx.strokeStyle = tree ? "#343a41" : "#262b30";
+    ctx.beginPath();
+    if (tree) { const sx = a.dx + (a.leaf ? 0 : 0), mx = (sx + b.dx) / 2; ctx.moveTo(sx, a.dy); ctx.bezierCurveTo(mx, a.dy, mx, b.dy, b.dx, b.dy); }
+    else { ctx.moveTo(a.dx, a.dy); ctx.lineTo(b.dx, b.dy); }
+    ctx.stroke();
+  }
   for (const n of nodes) {
+    if (n.op < 0.02) continue;
+    ctx.globalAlpha = n.op;
     const t = n.leaf ? store.get(n.id) : null;
     const alarm = t && isAlarm(t);
-    const r = n.leaf ? 2.4 + Math.min(2.6, ratePerMin(t, now) / 25) : 7.5 - Math.min(n.depth, 4) * 1.1;
+    const r = tree ? (n.leaf ? 3.5 : 5.5) : n.leaf ? 2.4 + Math.min(2.6, ratePerMin(t, now) / 25) : 7.5 - Math.min(n.depth, 4) * 1.1;
     const p = pulses.get(n.id), age = p ? now - p : Infinity;
     if (n.leaf && age < 1100) {
-      ctx.beginPath(); ctx.arc(n.x, n.y, r + (age / 1100) * 7, 0, 2 * Math.PI);
+      ctx.beginPath(); ctx.arc(n.dx, n.dy, r + (age / 1100) * 7, 0, 2 * Math.PI);
       ctx.strokeStyle = alarm ? `rgba(208,59,59,${1 - age / 1100})` : `rgba(59,139,230,${1 - age / 1100})`;
       ctx.lineWidth = 1.2 / transform.k + 0.3; ctx.stroke();
     }
-    ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, 2 * Math.PI);
-    ctx.fillStyle = alarm ? "#d03b3b" : LEVELS[Math.min(n.depth, 5)];
+    ctx.beginPath(); ctx.arc(n.dx, n.dy, r, 0, 2 * Math.PI);
+    ctx.fillStyle = alarm ? "#d03b3b" : LEVELS[n.leaf ? 5 : Math.min(n.depth, 4)];
     ctx.fill();
     if (n.id === selected || n.id === hover) { ctx.strokeStyle = "#eceeef"; ctx.lineWidth = 1.5 / transform.k; ctx.stroke(); }
-    if (!n.leaf || transform.k > 2.4 || n.id === selected) {
+    if (tree) drawTreeLabel(n, t, alarm, r);
+    else if (!n.leaf || transform.k > 2.4 || n.id === selected) {
       const fs = (n.leaf ? 9.5 : 12.5 - n.depth) / Math.max(transform.k, 0.6);
       ctx.font = `${n.leaf ? 400 : 600} ${fs}px "IBM Plex Sans", sans-serif`;
       ctx.textAlign = "center"; ctx.textBaseline = "top";
-      ctx.lineWidth = 3 / transform.k; ctx.strokeStyle = "#0c0e10"; ctx.strokeText(n.name, n.x, n.y + r + 2 / transform.k);
-      ctx.fillStyle = n.leaf ? "#b9bfc5" : "#eceeef"; ctx.fillText(n.name, n.x, n.y + r + 2 / transform.k);
+      ctx.lineWidth = 3 / transform.k; ctx.strokeStyle = "#0c0e10"; ctx.strokeText(n.name, n.dx, n.dy + r + 2 / transform.k);
+      ctx.fillStyle = n.leaf ? "#b9bfc5" : "#eceeef"; ctx.fillText(n.name, n.dx, n.dy + r + 2 / transform.k);
     }
   }
   ctx.restore();
+  ctx.globalAlpha = 1;
 }
+function drawTreeLabel(n, t, alarm, r) {
+  let x = n.dx + r + 6;
+  const y = n.dy;
+  ctx.textBaseline = "middle"; ctx.textAlign = "left";
+  if (!n.leaf) {
+    // Chevron, name, level badge, and a count when folded
+    ctx.font = `600 13px "IBM Plex Mono", monospace`;
+    ctx.fillStyle = "#eceeef"; ctx.fillText(n.name, x, y);
+    x += ctx.measureText(n.name).width + 8;
+    const badge = levelOf(n);
+    ctx.font = `500 10.5px "IBM Plex Sans", sans-serif`;
+    const bw = ctx.measureText(badge).width + 10;
+    roundRect(x, y - 8, bw, 16, 4); ctx.fillStyle = "#1d2125"; ctx.fill(); ctx.strokeStyle = "#343a41"; ctx.lineWidth = 1 / transform.k; ctx.stroke();
+    ctx.fillStyle = LEVELS[Math.min(n.depth, 4)] === "#eceeef" ? "#b9bfc5" : LEVELS[Math.min(n.depth, 4)];
+    ctx.fillText(badge, x + 5, y + 0.5);
+    if (treeCollapsed.has(n.id) && !keep) {
+      const count = nodes.filter((m) => m.leaf && m.id.startsWith(n.id + "/")).length;
+      ctx.fillStyle = "#7f878f"; ctx.font = `400 11px "IBM Plex Sans", sans-serif`;
+      ctx.fillText(`▸ ${count} tags`, x + bw + 8, y + 0.5);
+    }
+  } else {
+    ctx.font = `400 12.5px "IBM Plex Mono", monospace`;
+    ctx.fillStyle = "#b9bfc5"; ctx.fillText(n.name, x, y);
+    x += ctx.measureText(n.name).width + 10;
+    ctx.font = `500 12.5px "IBM Plex Mono", monospace`;
+    ctx.fillStyle = alarm ? "#e66767" : "#eceeef";
+    ctx.fillText(fmt(t), x, y);
+  }
+}
+function setLayout(next) {
+  layout = next;
+  $("layout").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.l === next)));
+  $("tree-tools").hidden = next !== "tree";
+  $("tab-hint").textContent = next === "tree" ? "Click a branch to fold it · ⌘/Ctrl + scroll zooms" : "Drag to pan, scroll to zoom, click a tag for details";
+  fitGraph();
+}
+$("layout").onclick = (e) => { const b = e.target.closest("button"); if (b) setLayout(b.dataset.l); };
+function applyTreeFilter(refit) {
+  computeKeep();
+  layoutTree();
+  const m = keep ? nodes.filter((n) => n.leaf && keep.has(n.id)).length : null;
+  $("tree-count").textContent = m == null ? "" : m ? `${m} of ${store.size} topics` : "No topics match";
+  if (refit) fitGraph();
+}
+$("tree-filter").oninput = (e) => { treeFilter = e.target.value; applyTreeFilter(true); };
+$("tree-filter").onkeydown = (e) => { if (e.key === "Escape") { e.target.value = ""; treeFilter = ""; applyTreeFilter(true); } };
+const clearTreeFilter = () => { $("tree-filter").value = ""; treeFilter = ""; keep = null; $("tree-count").textContent = ""; };
+$("expand-all").onclick = () => { clearTreeFilter(); treeCollapsed.clear(); layoutTree(); fitGraph(); };
+$("collapse-all").onclick = () => { clearTreeFilter(); treeCollapsed.clear(); nodes.forEach((n) => !n.leaf && n.depth >= 2 && treeCollapsed.add(n.id)); layoutTree(); fitGraph(); };
 function renderHover() {
   const el = $("hover");
   const t = hover && store.get(hover);
@@ -948,8 +1093,8 @@ function showTab(name) {
   $("tab-graph").setAttribute("aria-selected", String(g));
   $("tab-explorer").setAttribute("aria-selected", String(!g));
   $("view-graph").hidden = !g; $("view-explorer").hidden = g;
-  $("tab-hint").textContent = g ? "Drag to pan, scroll to zoom, click a tag for details" : "Charts refresh every 5 seconds";
-  if (g) { resizeCanvas(); } else { syncTree(); renderTrend(); }
+  $("graph-tools").hidden = !g;
+  if (g) { resizeCanvas(); setLayout(layout); } else { $("tab-hint").textContent = "Charts refresh every 5 seconds"; syncTree(); renderTrend(); }
 }
 $("tab-graph").onclick = () => showTab("graph");
 $("tab-explorer").onclick = () => showTab("explorer");
@@ -1087,6 +1232,7 @@ setInterval(() => {
   if (!$("view-explorer").hidden) syncTree();
   if (hover) renderHover();
   if (selected && Date.now() - detailChartAt > 5000) renderDetail();
+  if (keep && layout === "tree") applyTreeFilter(false); // values change, so value matches can too
 }, 1000);
 setInterval(renderTrend, 5000);
 (function loop() { if (!$("view-graph").hidden) drawGraph(); requestAnimationFrame(loop); })();
