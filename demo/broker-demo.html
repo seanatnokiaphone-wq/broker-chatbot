@@ -81,6 +81,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .card-foot .btn.mini { padding: 2px 8px; font-size: 11px; }
 .card .state-timeline { padding: 4px 0; gap: 6px; }
 .card .st-label { display: none; }
+.toolbar-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.zoom-controls { display: flex; align-items: center; gap: 2px; border: 1px solid var(--line-2); border-radius: 8px; padding: 2px; }
+.zoom-controls button { background: none; border: none; color: var(--ink-2); border-radius: 6px; padding: 2px 8px; font-size: 13px; min-width: 26px; }
+.zoom-controls button:hover:not(:disabled) { background: var(--raised); color: var(--ink); }
+.zoom-controls button:disabled { opacity: .35; cursor: default; }
+.zoom-controls .reset.on { color: var(--accent); }
+.zoom-controls .zoom-range { padding: 0 6px; }
+.zoom-controls.compact { align-self: flex-start; border: none; padding: 0; }
 .json-view { margin: 4px 0; padding: 8px 10px; background: var(--page); border: 1px solid var(--line); border-radius: 8px; font-family: "IBM Plex Mono", monospace; font-size: 11.5px; line-height: 1.45; color: var(--ink-2); max-height: 340px; overflow: auto; white-space: pre; }
 .json-view .j-key { color: #9ec5f4; } .json-view .j-str { color: #8fd3b6; } .json-view .j-num { color: #f0c674; } .json-view .j-lit { color: #e598b8; }
 @media (max-width: 900px) { #view-graph:not([hidden]) { flex-direction: column; } .cards { width: auto; max-height: 45%; border-left: none; border-top: 1px solid var(--line); } }
@@ -247,13 +255,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
           <div class="chart-col">
             <div class="toolbar">
               <span class="muted small" id="pick-note">Click topics to chart them</span>
+              <div class="toolbar-right"><span id="trend-zoom"></span>
               <div class="seg" id="range">
                 <button data-min="15" aria-pressed="false">15 min</button>
                 <button data-min="60" aria-pressed="true">1 h</button>
                 <button data-min="180" aria-pressed="false">3 h</button>
-              </div>
+              </div></div>
             </div>
             <div id="trend"></div>
+            <div class="small muted" style="margin-top:6px">Drag across a chart to zoom into that range.</div>
           </div>
         </div>
       </div>
@@ -780,7 +790,50 @@ function makeTools(onCall) {
 const SERIES = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6"].map((v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim());
 const shortName = (t) => t.split("/").slice(-3).join("/");
 const timeFmt = (d) => new Date(d).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-function drawChart(el, topics, from, to, height = 200) {
+/* Chart time window: follows now until zoomed/panned, then fixed until reset. Clamped to retention. */
+function makeWin(minutes) {
+  return {
+    minutes, fixed: null,
+    range() { const n = Date.now(); return this.fixed || { from: n - this.minutes * 60_000, to: n }; },
+    get live() { return !this.fixed; },
+    set(f, t) {
+      const n = Date.now();
+      const s = Math.min(RETENTION_MS, Math.max(60_000, t - f));
+      let end = Math.min(n, (f + t) / 2 + s / 2), start = end - s;
+      if (start < n - RETENTION_MS) { start = n - RETENTION_MS; end = start + s; }
+      this.fixed = n - end < 2000 && Math.abs(s - this.minutes * 60_000) < 1000 ? null : { from: start, to: end };
+    },
+    zoomIn() { const { from, to } = this.range(), q = (to - from) / 4; this.set(from + q, to - q); },
+    zoomOut() { const { from, to } = this.range(), h = (to - from) / 2; this.set(from - h, to + h); },
+    pan(dir) {
+      const { from, to } = this.range(), span = to - from, n = Date.now();
+      let start = Math.max(n - RETENTION_MS, from + (dir * span) / 4), end = start + span;
+      if (end > n) { end = n; start = n - span; }
+      this.fixed = n - end < 2000 && Math.abs(span - this.minutes * 60_000) < 1000 ? null : { from: start, to: end };
+    },
+    reset() { this.fixed = null; },
+    setMinutes(m) { this.minutes = m; this.fixed = null; },
+  };
+}
+/** Zoom/pan/reset buttons for a window; calls rerender after each change. */
+function zoomControls(win, rerender, compact = false) {
+  const el = document.createElement("div");
+  el.className = `zoom-controls ${compact ? "compact" : ""}`;
+  const { from, to } = win.range();
+  el.innerHTML = `${!compact && !win.live ? `<span class="small muted zoom-range">${timeFmt(from)}–${timeFmt(to)}</span>` : ""}
+    <button data-z="left" title="Pan back in time" aria-label="Pan back in time">‹</button>
+    <button data-z="in" title="Zoom in" aria-label="Zoom in">＋</button>
+    <button data-z="out" title="Zoom out" aria-label="Zoom out">－</button>
+    <button data-z="right" title="Pan forward in time" aria-label="Pan forward in time" ${win.live ? "disabled" : ""}>›</button>
+    <button data-z="reset" class="reset ${win.live ? "" : "on"}" title="Reset to live" aria-label="Reset to live" ${win.live ? "disabled" : ""}>↺${compact ? "" : " Live"}</button>`;
+  el.onclick = (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    ({ left: () => win.pan(-1), right: () => win.pan(1), in: () => win.zoomIn(), out: () => win.zoomOut(), reset: () => win.reset() })[b.dataset.z]();
+    rerender();
+  };
+  return el;
+}
+function drawChart(el, topics, from, to, height = 200, onZoom) {
   el.innerHTML = "";
   const groups = d3.groups(topics, (t) => store.get(t)?.unit ?? "");
   for (const [unit, ts] of groups) {
@@ -794,7 +847,8 @@ function drawChart(el, topics, from, to, height = 200) {
     const x = d3.scaleTime().domain([from, to]).range([m.l, W - m.r]);
     const y = d3.scaleLinear().domain(d3.extent(all, (p) => p.avg).map((v, i) => v ?? i)).nice().range([H - m.b, m.t]);
     const svg = d3.select(wrap).append("svg").attr("viewBox", `0 0 ${W} ${H}`).attr("height", H).attr("role", "img").attr("aria-label", `Line chart: ${ts.map(shortName).join(", ")}`);
-    svg.append("g").attr("transform", `translate(0,${H - m.b})`).call(d3.axisBottom(x).ticks(Math.max(2, Math.floor(W / 110))).tickFormat(timeFmt).tickSizeOuter(0))
+    const tickFmt = to - from < 15 * 60_000 ? (d) => new Date(d).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : timeFmt;
+    svg.append("g").attr("transform", `translate(0,${H - m.b})`).call(d3.axisBottom(x).ticks(Math.max(2, Math.floor(W / (to - from < 15 * 60_000 ? 170 : 110)))).tickFormat(tickFmt).tickSizeOuter(0))
       .call((g) => g.selectAll("text").attr("fill", "var(--muted)").attr("font-size", 11)).call((g) => g.selectAll("line,path").attr("stroke", "var(--line-2)"));
     svg.append("g").attr("transform", `translate(${m.l},0)`).call(d3.axisLeft(y).ticks(4).tickSize(-(W - m.l - m.r)))
       .call((g) => g.select(".domain").remove()).call((g) => g.selectAll("line").attr("stroke", "var(--line)")).call((g) => g.selectAll("text").attr("fill", "var(--muted)").attr("font-size", 11));
@@ -810,7 +864,22 @@ function drawChart(el, topics, from, to, height = 200) {
     const cross = svg.append("line").attr("y1", m.t).attr("y2", H - m.b).attr("stroke", "var(--line-2)").attr("visibility", "hidden");
     const dots = series.map((s) => svg.append("circle").attr("r", 4).attr("fill", s.color).attr("stroke", "var(--page)").attr("stroke-width", 2).attr("visibility", "hidden"));
     const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true; wrap.appendChild(tip);
+    const brush = svg.append("rect").attr("y", m.t).attr("height", H - m.t - m.b).attr("fill", "var(--accent)").attr("fill-opacity", 0.15).attr("stroke", "var(--accent)").attr("stroke-opacity", 0.5).attr("visibility", "hidden");
+    let dragX = null;
     svg.append("rect").attr("x", m.l).attr("y", m.t).attr("width", W - m.l - m.r).attr("height", H - m.t - m.b).attr("fill", "transparent")
+      .style("cursor", onZoom ? "crosshair" : null)
+      .on("pointerdown", (ev) => { if (!onZoom) return; dragX = d3.pointer(ev)[0]; ev.target.setPointerCapture?.(ev.pointerId); })
+      .on("pointerup", (ev) => {
+        if (dragX == null) return;
+        const x1 = Math.max(m.l, Math.min(W - m.r, d3.pointer(ev)[0])), x0 = dragX;
+        dragX = null; brush.attr("visibility", "hidden");
+        if (Math.abs(x1 - x0) > 6) onZoom(x.invert(Math.min(x0, x1)).getTime(), x.invert(Math.max(x0, x1)).getTime());
+      })
+      .on("pointermove.brush", (ev) => {
+        if (dragX == null) return;
+        const x1 = Math.max(m.l, Math.min(W - m.r, d3.pointer(ev)[0]));
+        brush.attr("x", Math.min(dragX, x1)).attr("width", Math.abs(x1 - dragX)).attr("visibility", "visible");
+      })
       .on("pointermove", (ev) => {
         const [px] = d3.pointer(ev);
         const tx = x.invert(px).getTime();
@@ -1153,7 +1222,7 @@ function renderHover() {
 }
 /* Trend cards: clicking tags stacks live cards beside the graph, newest first, each with its own range. */
 let detailChartAt = 0;
-const cardRange = new Map();
+const cardWins = new Map(); // topic -> time window
 const MAX_CARDS = 8;
 function openCard(topic) { cards = [topic, ...cards.filter((c) => c !== topic)].slice(0, MAX_CARDS); renderDetail(); }
 function addToTrends(topics) { picked = [...new Set([...picked, ...topics])].slice(-6); showTab("explorer"); renderTrend(); syncTree(); }
@@ -1194,11 +1263,13 @@ function renderDetail() {
   const list = el.querySelector(".cards-scroll");
   for (const topic of cards) {
     if (docs.has(topic)) { list.appendChild(rawCard(topic)); continue; }
-    const t = store.get(topic), min = cardRange.get(topic) ?? 15;
+    const t = store.get(topic);
+    if (!cardWins.has(topic)) cardWins.set(topic, makeWin(15));
+    const win = cardWins.get(topic), min = win.minutes, { from, to } = win.range();
     const c = document.createElement("div");
     c.className = "card";
     c.innerHTML = `<div class="card-head"><div class="mono small"></div><button class="icon-btn" data-a="close" aria-label="Close card">✕</button></div>
-      <div class="card-row"><div class="v ${isAlarm(t) ? "bad" : ""}"></div><div class="seg">${[15, 60, 180].map((m) => `<button data-m="${m}" aria-pressed="${m === min}">${m < 60 ? m + "m" : m / 60 + "h"}</button>`).join("")}</div></div>
+      <div class="card-row"><div class="v ${isAlarm(t) ? "bad" : ""}"></div><div class="seg">${[15, 60, 180].map((m) => `<button data-m="${m}" aria-pressed="${win.live && m === min}">${m < 60 ? m + "m" : m / 60 + "h"}</button>`).join("")}</div></div>
       <div class="dchart"></div>
       <div class="card-foot"><span class="small muted"></span><span class="btns">${t.source ? '<button class="btn mini" data-a="raw" title="Show the raw JSON document">{ }</button> ' : ""}<button class="btn mini" data-a="trend">Trends</button> <button class="btn mini" data-a="ask">Ask</button></span></div>`;
     c.querySelector(".mono").textContent = topic.split("/").slice(-3).join("/");
@@ -1209,11 +1280,11 @@ function renderDetail() {
     c.querySelector('[data-a="trend"]').onclick = () => addToTrends([topic]);
     if (t.source) c.querySelector('[data-a="raw"]').onclick = () => openCard(t.source);
     c.querySelector('[data-a="ask"]').onclick = () => { $("input").value = `What has ${topic} been doing over the last hour?`; $("input").focus(); };
-    c.querySelector(".seg").onclick = (e) => { const b = e.target.closest("button"); if (b) { cardRange.set(topic, Number(b.dataset.m)); renderDetail(); } };
+    c.querySelector(".seg").onclick = (e) => { const b = e.target.closest("button"); if (b) { win.setMinutes(Number(b.dataset.m)); renderDetail(); } };
     list.appendChild(c);
-    const now = Date.now();
-    if (t.numeric) drawChart(c.querySelector(".dchart"), [topic], now - min * 60_000, now, 110);
-    else drawStates(c.querySelector(".dchart"), [topic], now - min * 60_000, now);
+    if (t.numeric) drawChart(c.querySelector(".dchart"), [topic], from, to, 110, (f, tt) => { win.set(f, tt); renderDetail(); });
+    else drawStates(c.querySelector(".dchart"), [topic], from, to);
+    c.querySelector(".dchart").after(zoomControls(win, renderDetail, true));
   }
   list.scrollTop = scroll;
   detailChartAt = Date.now();
@@ -1223,7 +1294,7 @@ function renderDetail() {
  * Explorer
  * ------------------------------------------------------------------ */
 let picked = [`${ROOT}/packaging/line1/speed`, `${ROOT}/packaging/line2/speed`];
-let minutes = 60;
+const trendWin = makeWin(60);
 const collapsed = new Set();
 const rowEls = new Map();
 function buildTree() {
@@ -1289,14 +1360,16 @@ function renderTrend() {
   if ($("view-explorer").hidden) return;
   if (!picked.length) { $("trend").innerHTML = `<div class="empty">Pick topics from the tree to compare their history.</div>`; return; }
   const numeric = picked.filter((t) => store.get(t)?.numeric), text = picked.filter((t) => !numeric.includes(t));
-  if (numeric.length) drawChart($("trend"), numeric, Date.now() - minutes * 60_000, Date.now(), text.length ? 200 : 260);
+  const { from, to } = trendWin.range();
+  $("trend-zoom").replaceChildren(zoomControls(trendWin, renderTrend));
+  $("range").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(trendWin.live && Number(x.dataset.min) === trendWin.minutes)));
+  if (numeric.length) drawChart($("trend"), numeric, from, to, text.length ? 200 : 260, (f, t) => { trendWin.set(f, t); renderTrend(); });
   else $("trend").innerHTML = "";
-  if (text.length) drawStates($("trend"), text, Date.now() - minutes * 60_000, Date.now());
+  if (text.length) drawStates($("trend"), text, from, to);
 }
 $("range").onclick = (e) => {
   const b = e.target.closest("button"); if (!b) return;
-  minutes = Number(b.dataset.min);
-  $("range").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+  trendWin.setMinutes(Number(b.dataset.min));
   renderTrend();
 };
 
