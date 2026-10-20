@@ -1,8 +1,9 @@
-import { ArrowUp, Loader2, RotateCcw, Square, Wrench } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { ArrowUp, Crosshair, Loader2, RotateCcw, Square, Wrench } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import { resetChat, sendChat, type ChartSpec } from "../api";
 import type { Live } from "../useLive";
+import { buildTopicIndex, linkTopics, resolveTopic, TOPIC_HREF, type TopicIndex } from "../topicLinks";
 import { HistoryChart } from "./HistoryChart";
 
 type Part =
@@ -42,10 +43,31 @@ interface Props {
   enabled: boolean;
   draft: string;
   onDraftUsed: () => void;
+  /** Highlight a topic, branch or filter (comma-separated for several) in the graph. */
+  onHighlight: (query: string) => void;
+}
+
+const shortTopic = (t: string) => (t.includes(",") ? `${t.split(",").length} × ${t.split(",")[0].trim().split("/").slice(-2).join("/")}` : t.split("/").slice(-3).join("/"));
+
+/** Topics an answer mentions, plus the ones its tool calls looked at. */
+function relatedTopics(m: Msg, index: TopicIndex): string[] {
+  const out = new Set<string>();
+  for (const p of m.parts) {
+    if (p.kind === "text") linkTopics(p.text, index).topics.forEach((t) => out.add(t));
+    else if (p.kind === "chart") p.chart.topics.forEach((t) => out.add(t));
+    else if (p.kind === "tool") {
+      const args = [p.input.topic, p.input.filter, ...(Array.isArray(p.input.topics) ? p.input.topics : [])];
+      for (const a of args) {
+        const t = typeof a === "string" && a !== "#" ? resolveTopic(a, index) : null;
+        if (t) out.add(t);
+      }
+    }
+  }
+  return [...out];
 }
 
 /** Chat with Claude about the broker. Tool calls show as chips and charts render inline. */
-export function Chat({ live, enabled, draft, onDraftUsed }: Props) {
+export function Chat({ live, enabled, draft, onDraftUsed, onHighlight }: Props) {
   const [sessionId, setSessionId] = useState(newSessionId);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
@@ -53,6 +75,31 @@ export function Chat({ live, enabled, draft, onDraftUsed }: Props) {
   const abort = useRef<AbortController | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const topicKey = [...live.topics.keys()].sort().join("\n");
+  const index = useMemo(() => buildTopicIndex(topicKey ? topicKey.split("\n") : []), [topicKey]);
+  const mdComponents = useMemo(
+    () => ({
+      a: ({ href, children }: { href?: string; children?: React.ReactNode }) =>
+        href?.startsWith(TOPIC_HREF) ? (
+          <a
+            href={href}
+            className="topic-link"
+            title="Highlight in the topic graph"
+            onClick={(e) => {
+              e.preventDefault();
+              onHighlight(decodeURIComponent(href.slice(TOPIC_HREF.length)));
+            }}
+          >
+            {children}
+          </a>
+        ) : (
+          <a href={href} target="_blank" rel="noreferrer">
+            {children}
+          </a>
+        ),
+    }),
+    [onHighlight],
+  );
 
   useEffect(() => {
     if (draft) {
@@ -138,7 +185,7 @@ export function Chat({ live, enabled, draft, onDraftUsed }: Props) {
                   <p key={j}>{p.text}</p>
                 ) : (
                   <div key={j} className="md">
-                    <Markdown>{p.text}</Markdown>
+                    <Markdown components={mdComponents}>{linkTopics(p.text, index).md}</Markdown>
                   </div>
                 )
               ) : p.kind === "tool" ? (
@@ -164,6 +211,7 @@ export function Chat({ live, enabled, draft, onDraftUsed }: Props) {
                 <Loader2 size={14} className="spin" /> Thinking…
               </div>
             )}
+            {m.role === "assistant" && !(busy && i === messages.length - 1) && <Related topics={relatedTopics(m, index)} onHighlight={onHighlight} isTag={(t) => live.topics.has(t)} />}
             {m.error && <div className="error">{m.error}</div>}
           </div>
         ))}
@@ -201,5 +249,28 @@ export function Chat({ live, enabled, draft, onDraftUsed }: Props) {
         )}
       </form>
     </aside>
+  );
+}
+
+/** Chips for the topics an answer relates to; clicking one highlights it in the graph. */
+function Related({ topics, onHighlight, isTag }: { topics: string[]; onHighlight: (query: string) => void; isTag: (t: string) => boolean }) {
+  if (!topics.length) return null;
+  const shown = topics.slice(0, 8);
+  // Highlight all covers the tags and filters, not whole branches, which would light up everything under them.
+  const all = topics.filter((t) => isTag(t) || /[+#,]/.test(t));
+  return (
+    <div className="related">
+      <span className="small muted">Topics in this answer</span>
+      {shown.map((t) => (
+        <button key={t} className="related-chip mono" title={t} onClick={() => onHighlight(t)}>
+          {shortTopic(t)}
+        </button>
+      ))}
+      {all.length > 1 && (
+        <button className="related-chip all" onClick={() => onHighlight(all.join(", "))} title="Highlight all of these in the topic graph">
+          <Crosshair size={11} /> Highlight all
+        </button>
+      )}
+    </div>
   );
 }

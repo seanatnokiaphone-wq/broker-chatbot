@@ -1,7 +1,7 @@
 import { Activity, Database, Network, Radio, Rows3 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Area, AreaChart, ResponsiveContainer, YAxis } from "recharts";
-import { getStatus, isAlarm, textValue, type Status } from "./api";
+import { getStatus, isAlarm, textValue, type Focus, type Status } from "./api";
 import { SERIES, STATUS } from "./colors";
 import { Chat } from "./components/Chat";
 import { Explorer } from "./components/Explorer";
@@ -23,6 +23,13 @@ export default function App() {
   const openCard = (topic: string) => setCards((cs) => [topic, ...cs.filter((c) => c !== topic)].slice(0, MAX_CARDS));
   const [chartTopics, setChartTopics] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
+  // Topics clicked in a chat answer: highlighted in the graph or tree, and a single tag also opens its card.
+  const [focus, setFocus] = useState<Focus>();
+  const highlight = (query: string) => {
+    setView("graph");
+    setFocus({ query, nonce: Date.now() });
+    if (live.topics.has(query)) openCard(query);
+  };
 
   useEffect(() => {
     const load = () => getStatus().then(setStatus).catch(() => setStatus(null));
@@ -102,9 +109,9 @@ export default function App() {
             <div className="graph-view">
               <div className="graph-main">
                 {graphLayout === "network" ? (
-                  <TopicGraph live={live} selected={cardSet} onSelect={openCard} />
+                  <TopicGraph live={live} selected={cardSet} onSelect={openCard} focus={focus} />
                 ) : (
-                  <TopicTree live={live} selected={cardSet} onSelect={openCard} />
+                  <TopicTree live={live} selected={cardSet} onSelect={openCard} focus={focus} />
                 )}
               </div>
               <TrendCards
@@ -121,7 +128,7 @@ export default function App() {
             <Explorer live={live} chartTopics={chartTopics} onToggle={toggleChart} />
           )}
         </section>
-        <Chat live={live} enabled={!!status?.chatEnabled} draft={draft} onDraftUsed={clearDraft} />
+        <Chat live={live} enabled={!!status?.chatEnabled} draft={draft} onDraftUsed={clearDraft} onHighlight={highlight} />
       </main>
     </div>
   );

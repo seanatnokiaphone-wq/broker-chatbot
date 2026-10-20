@@ -116,6 +116,9 @@ Filler `fill_weight` has spec 495 to 505 g with a 500 g target (set in `SPC_SPEC
 
 ## Things to ask
 
+Topic names in an answer are links: click one to highlight it in the topic graph (everything else dims and the view zooms to it) and open its trend card. Short names like `line2/filler/motor_temp`, branches and MQTT filters work too. Under each answer, **Topics in this answer** lists what it mentioned and what its tools looked at, with **Highlight all**.
+
+
 - "Give me an overview of what's on the broker"
 - "Is anything abnormal in the last 30 minutes?"
 - "When did packaging line 1 last go down, and for how long?"

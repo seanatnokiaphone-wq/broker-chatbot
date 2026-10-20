@@ -1,7 +1,7 @@
 import { Search, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D, { type ForceGraphMethods, type NodeObject } from "react-force-graph-2d";
-import { docOf, docTopics, graphTopics, isAlarm, type TopicRow } from "../api";
+import { docOf, docTopics, graphTopics, isAlarm, type Focus, type TopicRow } from "../api";
 import { JSON_COLOR, LEVELS, LEVEL_NAMES, STATUS } from "../colors";
 import { topicMatcher } from "../filter";
 import type { Live } from "../useLive";
@@ -25,10 +25,12 @@ interface Props {
   /** Topics with an open trend card. */
   selected: Set<string>;
   onSelect: (topic: string) => void;
+  /** Highlight request from elsewhere, e.g. a topic clicked in a chat answer. */
+  focus?: Focus;
 }
 
 /** Force-directed view of the topic tree: one node per path segment, tags pulse as messages arrive. */
-export function TopicGraph({ live, selected, onSelect }: Props) {
+export function TopicGraph({ live, selected, onSelect, focus }: Props) {
   const wrap = useRef<HTMLDivElement>(null);
   const fg = useRef<ForceGraphMethods<NodeObject<GNode>> | undefined>(undefined);
   const [size, setSize] = useState({ w: 800, h: 600 });
@@ -67,15 +69,24 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
     return { nodes: [...nodes.values()], links };
   }, [topicKey, docKey]);
 
+  // Whether the layout has settled since the graph last changed, so zooming to a node lands where it stays.
+  const settled = useRef(false);
   useEffect(() => {
+    settled.current = false;
     fg.current?.d3Force("charge")?.strength(-40);
     fg.current?.d3Force("link")?.distance((l: { target: GNode }) => (l.target.leaf ? 14 : 40 - l.target.depth * 4));
-    const t = setTimeout(() => fg.current?.zoomToFit(600, 60), 1500);
+    // Fit everything once laid out, unless a search or highlight has already zoomed in.
+    const t = setTimeout(() => !queryRef.current && fg.current?.zoomToFit(600, 60), 1500);
     return () => clearTimeout(t);
   }, [data]);
 
   // Search: matching tags and their parent branches stay bright, everything else dims.
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(focus?.query ?? "");
+  const queryRef = useRef(query);
+  queryRef.current = query;
+  useEffect(() => {
+    if (focus) setQuery(focus.query);
+  }, [focus?.nonce]);
   const hits = useMemo(() => {
     const match = topicMatcher(query);
     if (!match) return null;
@@ -93,9 +104,20 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
   const hitKey = hits ? [...hits.tags].sort().join("\n") : "";
   useEffect(() => {
     if (!hits?.tags.size) return;
-    const t = setTimeout(() => fg.current?.zoomToFit(600, 80, (n) => hits.tags.has(n.id as string)), 250);
+    let tries = 0;
+    let t: ReturnType<typeof setTimeout>;
+    const go = () => {
+      // One hit: zoom right in on it (once the layout has placed it). Several: fit them all.
+      const only = hits.tags.size === 1 ? (data.nodes.find((n) => hits.tags.has(n.id)) as NodeObject<GNode> | undefined) : undefined;
+      if (!settled.current && tries++ < 12) t = setTimeout(go, 300);
+      else if (only) {
+        fg.current?.centerAt(only.x, only.y, 600);
+        fg.current?.zoom(3, 600);
+      } else fg.current?.zoomToFit(600, 80, (n) => hits.tags.has(n.id as string));
+    };
+    t = setTimeout(go, 250);
     return () => clearTimeout(t);
-  }, [hitKey]);
+  }, [hitKey, focus?.nonce]);
 
   const onSearchKey = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") setQuery("");
@@ -114,6 +136,7 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
         backgroundColor="#0d0d0d"
         autoPauseRedraw={false}
         cooldownTicks={200}
+        onEngineStop={() => (settled.current = true)}
         linkColor={(l) => (hits && !hits.lit.has((l.target as unknown as GNode).id) ? "#1a1a19" : "#2c2c2a")}
         linkWidth={1}
         nodeRelSize={4}

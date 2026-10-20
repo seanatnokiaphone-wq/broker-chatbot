@@ -216,3 +216,10 @@ button.icon:hover { color: var(--ink); background: var(--surface-2); }
 .spc-cap { display: flex; flex-wrap: wrap; gap: 4px 10px; padding-top: 2px; }
 .text-toggle { font-size: 11px; padding: 1px 7px; border-radius: 6px; border: 1px solid var(--line-2); background: transparent; color: var(--muted, #898781); }
 .text-toggle.on { border-color: var(--accent); color: var(--accent); }
+.md a.topic-link { color: var(--accent); text-decoration: none; border-bottom: 1px dashed rgba(57,135,229,.5); cursor: pointer; }
+.md a.topic-link:hover { border-bottom-style: solid; }
+.md a.topic-link code { color: inherit; }
+.related { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin-top: 8px; }
+.related-chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line-2); background: transparent; color: #c3c2b7; display: inline-flex; gap: 4px; align-items: center; }
+.related-chip:hover { border-color: var(--accent); color: var(--accent); }
+.related-chip.all { color: var(--accent); }

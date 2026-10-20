@@ -15,6 +15,16 @@ function mqttMatch(filter: string, topic: string): boolean {
  * text with + or # is treated as an MQTT filter. Returns null for an empty query.
  */
 export function topicMatcher(query: string): ((topic: string, row?: TopicRow) => boolean) | null {
+  // Several terms separated by commas match any of them (used when highlighting topics from a chat answer).
+  const terms = query.split(",").map((t) => t.trim()).filter(Boolean);
+  if (terms.length > 1) {
+    const ms = terms.map(termMatcher).filter((m) => m !== null);
+    return (topic, row) => ms.some((m) => m(topic, row));
+  }
+  return termMatcher(query);
+}
+
+function termMatcher(query: string): ((topic: string, row?: TopicRow) => boolean) | null {
   const f = query.trim().toLowerCase();
   if (!f) return null;
   if (/[+#]/.test(f)) return (topic) => mqttMatch(f, topic.toLowerCase());

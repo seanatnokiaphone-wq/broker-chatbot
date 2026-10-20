@@ -166,6 +166,12 @@ export function isAlarm(row: TopicRow): boolean {
   return BAD.test(t);
 }
 
+/** A request to highlight topics in the graph or tree: a topic, a branch, an MQTT filter, or several joined by commas. */
+export interface Focus {
+  query: string;
+  nonce: number;
+}
+
 export type SpcChartType = "xbar-r" | "xbar-s" | "imr";
 export interface Spc {
   chart: SpcChartType;

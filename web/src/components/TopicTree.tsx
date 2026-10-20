@@ -1,7 +1,7 @@
 import { cluster, hierarchy } from "d3-hierarchy";
 import { Search } from "lucide-react";
-import { useMemo, useState } from "react";
-import { display, docOf, docTopics, graphTopics, isAlarm } from "../api";
+import { useEffect, useMemo, useState } from "react";
+import { display, docOf, docTopics, graphTopics, isAlarm, type Focus } from "../api";
 import { JSON_COLOR, LEVELS, STATUS } from "../colors";
 import { topicMatcher } from "../filter";
 import type { Live } from "../useLive";
@@ -25,10 +25,12 @@ interface Props {
   /** Topics with an open trend card. */
   selected: Set<string>;
   onSelect: (topic: string) => void;
+  /** Highlight request from elsewhere, e.g. a topic clicked in a chat answer. */
+  focus?: Focus;
 }
 
 /** Left-to-right view of the topic tree: one column per ISA-95 level, branches fold, tags show live values. */
-export function TopicTree({ live, selected, onSelect }: Props) {
+export function TopicTree({ live, selected, onSelect, focus }: Props) {
   const topicKey = graphTopics(live.topics).sort().join("\n");
   const docKey = docTopics(live.topics).sort().join("\n");
   const root = useMemo(() => {
@@ -69,7 +71,10 @@ export function TopicTree({ live, selected, onSelect }: Props) {
 
   // Filter by topic path or current value text, or by an MQTT filter with + / #.
   // While it's set, matching branches open and everything else is hidden.
-  const [filter, setFilter] = useState("");
+  const [filter, setFilter] = useState(focus?.query ?? "");
+  useEffect(() => {
+    if (focus) setFilter(focus.query);
+  }, [focus?.nonce]);
   const keep = useMemo(() => {
     const match = topicMatcher(filter);
     if (!match) return null;

@@ -209,6 +209,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .spc-cap .warn { color: var(--warning); }
 .spc-cap { display: flex; flex-wrap: wrap; gap: 4px 10px; padding-top: 2px; }
 .spc-label { font-size: 11px; margin-top: 2px; }
+.md a.topic-link { color: var(--accent); text-decoration: none; border-bottom: 1px dashed rgba(57,135,229,.5); cursor: pointer; }
+.md a.topic-link:hover { border-bottom-style: solid; }
+.md a.topic-link code { color: inherit; }
+.related { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin-top: 8px; }
+.related-chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line-2); background: transparent; color: #c3c2b7; cursor: pointer; }
+.related-chip:hover { border-color: var(--accent); color: var(--accent); }
+.related-chip.all { color: var(--accent); }
 .btn.mini.on { border-color: var(--accent); color: var(--accent); }
 </style>
 
@@ -1369,14 +1376,14 @@ const treeCollapsed = new Set(nodes.filter((n) => !n.leaf && (n.depth >= 4 || n.
 // In the tree, matching branches open and everything else is hidden; in the network, everything else dims.
 let treeFilter = "", keep = null;
 function computeKeep() {
-  const f = treeFilter.trim().toLowerCase();
-  if (!f) { keep = null; return; }
-  const wild = /[+#]/.test(f);
+  // Several terms separated by commas match any of them (used when highlighting topics from a chat answer).
+  const terms = treeFilter.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+  if (!terms.length) { keep = null; return; }
   keep = new Set();
   for (const n of nodes) {
     if (!n.leaf) continue;
     const t = store.get(n.id);
-    const hit = wild ? mqttMatch(f, n.id.toLowerCase()) : n.id.toLowerCase().includes(f) || String(lastOf(t).value).toLowerCase().includes(f);
+    const hit = terms.some((f) => (/[+#]/.test(f) ? mqttMatch(f, n.id.toLowerCase()) : n.id.toLowerCase().includes(f) || String(lastOf(t).value).toLowerCase().includes(f)));
     if (hit) for (let p = n; p; p = p.parent) keep.add(p.id);
   }
 }
@@ -1418,7 +1425,7 @@ function fitGraph() {
     const hits = keep ? nodes.filter((n) => n.leaf && keep.has(n.id)) : [];
     const fit = hits.length ? hits : nodes;
     const xs = d3.extent(fit, (n) => n.x), ys = d3.extent(fit, (n) => n.y);
-    const k = Math.min(W / (xs[1] - xs[0] + 160), H / (ys[1] - ys[0] + 160), 4);
+    const k = Math.min(W / (xs[1] - xs[0] + 160), H / (ys[1] - ys[0] + 160), hits.length === 1 ? 3 : 4);
     transform = d3.zoomIdentity.translate(W / 2 - k * (xs[0] + xs[1]) / 2, H / 2 - k * (ys[0] + ys[1]) / 2).scale(k);
   }
   d3.select(canvas).call(zoom.transform, transform);
@@ -1793,8 +1800,73 @@ function renderEmpty() {
   for (const s of SUGGESTIONS) { const b = document.createElement("button"); b.textContent = s; b.onclick = () => send(s); box.appendChild(b); }
   msgs.appendChild(box);
 }
+/* ------------------------------------------------------------------ *
+ * Topic links in answers: topic names become links that highlight the topic in the graph.
+ * ------------------------------------------------------------------ */
+const TOPIC_HREF = "#topic:";
+let topicIndex = null, topicIndexSize = -1;
+function getTopicIndex() {
+  if (topicIndexSize === store.size) return topicIndex;
+  const paths = new Set(), suffixes = new Map();
+  for (const t of store.keys()) { const parts = t.split("/"); for (let i = 1; i <= parts.length; i++) paths.add(parts.slice(0, i).join("/")); }
+  for (const p of paths) { const parts = p.split("/"); for (let i = 1; i <= parts.length - 2; i++) { const sx = parts.slice(i).join("/"); suffixes.set(sx, [...(suffixes.get(sx) ?? []), p]); } }
+  topicIndexSize = store.size;
+  return (topicIndex = { paths, suffixes });
+}
+/** The topic, branch or filter a piece of text refers to; a short path that fits several topics resolves to all of them, comma-separated. */
+function resolveTopic(text) {
+  const idx = getTopicIndex(), t = text.replace(/[.,;:)]+$/, "");
+  if (idx.paths.has(t)) return t;
+  if (/[+#]/.test(t)) return t;
+  const hits = idx.suffixes.get(t);
+  return hits && hits.length <= 12 ? hits.join(", ") : null;
+}
+/** Rewrites topic mentions in Markdown as links, leaving fenced code alone. */
+function linkTopics(mdText) {
+  const found = new Set();
+  const out = mdText.split(/(```[\s\S]*?```)/).map((chunk, i) => i % 2 ? chunk : chunk.replace(/`?([A-Za-z0-9_.\-+#]+(?:\/[A-Za-z0-9_.\-+#]+)+)`?/g, (whole, cand, offset, all) => {
+    if (all[offset - 1] === "[" || all.slice(offset - 2, offset) === "](") return whole;
+    const topic = resolveTopic(cand);
+    if (!topic) return whole;
+    found.add(topic);
+    const trail = cand.match(/[.,;:)]+$/)?.[0] ?? "", bare = cand.slice(0, cand.length - trail.length), tick = whole.startsWith("`");
+    return `[${tick ? "`" + bare + "`" : bare}](${TOPIC_HREF}${encodeURIComponent(topic)})${tick ? "" : trail}`;
+  })).join("");
+  return { md: out, topics: [...found] };
+}
+/** Highlights a topic, branch or filter (comma-separated for several) in the topic graph; a single tag also opens its card. */
+function highlightTopics(query) {
+  showTab("graph");
+  $("tree-filter").value = query; treeFilter = query; applyTreeFilter(true);
+  if (store.has(query) || docs.has(query)) openCard(query);
+}
+/** Chips under an answer for the topics it mentions and the ones its tools looked at. */
+function relatedChips(a, topics) {
+  a.querySelector(".related")?.remove();
+  if (!topics.length) return;
+  const box = document.createElement("div"); box.className = "related";
+  box.innerHTML = `<span class="small muted">Topics in this answer</span>`;
+  const short = (t) => (t.includes(",") ? `${t.split(",").length} × ${t.split(",")[0].trim().split("/").slice(-2).join("/")}` : t.split("/").slice(-3).join("/"));
+  for (const t of topics.slice(0, 8)) {
+    const b = document.createElement("button"); b.className = "related-chip mono"; b.textContent = short(t); b.title = t;
+    b.onclick = () => highlightTopics(t); box.appendChild(b);
+  }
+  // Highlight all covers tags and filters, not whole branches, which would light up everything under them.
+  const all = topics.filter((t) => store.has(t) || /[+#,]/.test(t));
+  if (all.length > 1) {
+    const b = document.createElement("button"); b.className = "related-chip all"; b.textContent = "⌖ Highlight all"; b.title = "Highlight all of these in the topic graph";
+    b.onclick = () => highlightTopics(all.join(", ")); box.appendChild(b);
+  }
+  a.appendChild(box);
+}
 function md(el, text) {
-  el.innerHTML = DOMPurify.sanitize(marked.parse(text));
+  const linked = linkTopics(text);
+  el.innerHTML = DOMPurify.sanitize(marked.parse(linked.md));
+  el.querySelectorAll(`a[href^="${TOPIC_HREF}"]`).forEach((link) => {
+    link.className = "topic-link"; link.title = "Highlight in the topic graph";
+    link.onclick = (e) => { e.preventDefault(); highlightTopics(decodeURIComponent(link.getAttribute("href").slice(TOPIC_HREF.length))); };
+  });
+  el.querySelectorAll('a:not(.topic-link)').forEach((link) => { link.target = "_blank"; link.rel = "noreferrer"; });
   el.querySelectorAll("table").forEach((t) => { const w = document.createElement("div"); w.className = "tbl"; t.replaceWith(w); w.appendChild(t); });
 }
 const ERR = {
@@ -1836,7 +1908,9 @@ async function send(text) {
     a.insertBefore(box, body);
     requestAnimationFrame(() => drawChart(box.querySelector(".c"), c.topics, c.from, c.to, 180));
   };
+  const toolTopics = new Set();
   const tools = makeTools((name, input) => {
+    for (const x of [input.topic, input.filter, ...(Array.isArray(input.topics) ? input.topics : [])]) { const t = typeof x === "string" && x !== "#" ? resolveTopic(x) : null; if (t) toolTopics.add(t); }
     const chip = document.createElement("div"); chip.className = "chip run";
     chip.innerHTML = "<span></span>"; chip.firstChild.textContent = TOOL_LABEL(name, input);
     a.insertBefore(chip, body); status.textContent = "Reading broker data…"; scrollDown();
@@ -1850,6 +1924,7 @@ async function send(text) {
     });
     status.remove();
     md(body, res.text);
+    relatedChips(a, [...new Set([...toolTopics, ...linkTopics(res.text).topics])]);
     turns.push({ role: "assistant", content: res.text });
     if (res.truncated) { const n = document.createElement("div"); n.className = "small muted"; n.textContent = "Answer cut short. Ask for less at a time."; a.appendChild(n); }
   } catch (e) {
