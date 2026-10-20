@@ -51,7 +51,10 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .graph-legend { position: absolute; left: 12px; bottom: 12px; display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--ink-2); background: rgba(26, 26, 25, 0.85); padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); }
 .graph-legend span { display: flex; align-items: center; gap: 5px; }
 .graph-legend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-.hover-card { position: absolute; left: 12px; top: 12px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; padding: 10px 12px; max-width: 360px; pointer-events: none; }
+.graph-search { position: absolute; left: 12px; top: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; max-width: calc(100% - 380px); }
+.graph-search .search { margin: 0; width: 380px; max-width: 100%; background: rgba(26, 26, 25, 0.92); }
+.graph-search .search button.icon { padding: 2px; }
+.hover-card { position: absolute; left: 12px; top: 58px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; padding: 10px 12px; max-width: 360px; pointer-events: none; }
 .hover-value { font-size: 20px; font-weight: 600; margin: 4px 0; }
 .detail { position: absolute; right: 12px; top: 12px; width: 340px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
 .detail-head { display: flex; justify-content: space-between; gap: 8px; align-items: start; word-break: break-all; }
@@ -147,5 +150,6 @@ button.icon:hover { color: var(--ink); background: var(--surface-2); }
   .chat { height: 80vh; border-left: none; border-top: 1px solid var(--line); }
   .explorer { grid-template-columns: 1fr; grid-template-rows: 40% 60%; }
   .detail { left: 12px; right: 12px; width: auto; }
+  .graph-search { max-width: calc(100% - 24px); }
   .topbar { flex-wrap: wrap; gap: 10px; }
 }

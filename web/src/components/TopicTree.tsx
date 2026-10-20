@@ -1,8 +1,9 @@
 import { cluster, hierarchy } from "d3-hierarchy";
 import { Search } from "lucide-react";
 import { useMemo, useState } from "react";
-import { display, isAlarm, textValue } from "../api";
+import { display, isAlarm } from "../api";
 import { LEVELS, STATUS } from "../colors";
+import { topicMatcher } from "../filter";
 import type { Live } from "../useLive";
 
 interface TNode {
@@ -16,16 +17,6 @@ interface TNode {
 const ROW = 24;
 const COL = 170;
 const LEVEL_BADGE = ["Enterprise", "Site", "Area", "Line", "Cell"];
-
-function mqttMatch(filter: string, topic: string): boolean {
-  const f = filter.split("/");
-  const t = topic.split("/");
-  for (let i = 0; i < f.length; i++) {
-    if (f[i] === "#") return true;
-    if (i >= t.length || (f[i] !== "+" && f[i] !== t[i])) return false;
-  }
-  return f.length === t.length;
-}
 
 interface Props {
   live: Live;
@@ -74,17 +65,11 @@ export function TopicTree({ live, selected, onSelect }: Props) {
   // While it's set, matching branches open and everything else is hidden.
   const [filter, setFilter] = useState("");
   const keep = useMemo(() => {
-    const f = filter.trim().toLowerCase();
-    if (!f) return null;
-    const wild = /[+#]/.test(f);
+    const match = topicMatcher(filter);
+    if (!match) return null;
     const ids = new Set<string>();
     const walk = (n: TNode): boolean => {
-      let hit = false;
-      if (n.leaf) {
-        const row = live.topics.get(n.id);
-        const value = row ? String(row.value ?? textValue(row) ?? "").toLowerCase() : "";
-        hit = wild ? mqttMatch(f, n.id.toLowerCase()) : n.id.toLowerCase().includes(f) || value.includes(f);
-      }
+      let hit = n.leaf && match(n.id, live.topics.get(n.id));
       for (const c of n.children) if (walk(c)) hit = true;
       if (hit) ids.add(n.id);
       return hit;

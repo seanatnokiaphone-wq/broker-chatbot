@@ -195,7 +195,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
             <button data-l="force" aria-pressed="true">Network</button>
             <button data-l="tree" aria-pressed="false">Tree →</button>
           </div>
-          <span id="tree-tools" hidden><label class="search tree-filter"><span aria-hidden="true">⌕</span><input id="tree-filter" placeholder="Filter: temp, line2, Down, +/+/+/+/+/motor_temp" aria-label="Filter tree"></label><span class="small muted" id="tree-count"></span><button class="btn" id="expand-all">Expand all</button> <button class="btn" id="collapse-all">Collapse all</button></span>
+          <label class="search tree-filter"><span aria-hidden="true">⌕</span><input id="tree-filter" placeholder="Search: temp, line2, Down, +/+/+/+/+/motor_temp" aria-label="Search topics"></label><span class="small muted" id="tree-count"></span>
+          <span id="tree-tools" hidden><button class="btn" id="expand-all">Expand all</button> <button class="btn" id="collapse-all">Collapse all</button></span>
         </div>
       </nav>
       <div class="view" id="view-graph">
@@ -782,8 +783,8 @@ for (const n of nodes) { n.dx = n.x; n.dy = n.y; n.op = 1; }
 /* Left-to-right tree: ISA-95 levels as columns, collapsible branches. */
 const ROW = 24, COL = 165;
 const treeCollapsed = new Set(nodes.filter((n) => !n.leaf && n.depth >= 4).map((n) => n.id)); // cells start folded
-// Filter: topic path or current value contains the text (or matches an MQTT filter with + / #).
-// While a filter is set, matching branches open automatically and everything else is hidden.
+// Search: topic path or current value contains the text (or matches an MQTT filter with + / #).
+// In the tree, matching branches open and everything else is hidden; in the network, everything else dims.
 let treeFilter = "", keep = null;
 function computeKeep() {
   const f = treeFilter.trim().toLowerCase();
@@ -832,8 +833,10 @@ function fitGraph() {
     const y0 = ys[1] - ys[0] + 40 < H / k ? H / 2 - k * (ys[0] + ys[1]) / 2 : 24 - k * ys[0];
     transform = d3.zoomIdentity.translate(24 - k * xs[0], y0).scale(k);
   } else {
-    const xs = d3.extent(nodes, (n) => n.x), ys = d3.extent(nodes, (n) => n.y);
-    const k = Math.min(W / (xs[1] - xs[0] + 80), H / (ys[1] - ys[0] + 80), 4);
+    const hits = keep ? nodes.filter((n) => n.leaf && keep.has(n.id)) : [];
+    const fit = hits.length ? hits : nodes;
+    const xs = d3.extent(fit, (n) => n.x), ys = d3.extent(fit, (n) => n.y);
+    const k = Math.min(W / (xs[1] - xs[0] + 160), H / (ys[1] - ys[0] + 160), 4);
     transform = d3.zoomIdentity.translate(W / 2 - k * (xs[0] + xs[1]) / 2, H / 2 - k * (ys[0] + ys[1]) / 2).scale(k);
   }
   d3.select(canvas).call(zoom.transform, transform);
@@ -888,7 +891,7 @@ function drawGraph() {
   for (const l of links) {
     const a = l.source, b = l.target;
     if (b.op < 0.02) continue;
-    ctx.globalAlpha = b.op;
+    ctx.globalAlpha = b.op * (!tree && keep && !keep.has(b.id) ? 0.15 : 1);
     ctx.strokeStyle = tree ? "#343a41" : "#262b30";
     ctx.beginPath();
     if (tree) { const sx = a.dx + (a.leaf ? 0 : 0), mx = (sx + b.dx) / 2; ctx.moveTo(sx, a.dy); ctx.bezierCurveTo(mx, a.dy, mx, b.dy, b.dx, b.dy); }
@@ -897,7 +900,8 @@ function drawGraph() {
   }
   for (const n of nodes) {
     if (n.op < 0.02) continue;
-    ctx.globalAlpha = n.op;
+    const dim = !tree && keep && !keep.has(n.id), hit = !tree && keep && n.leaf && keep.has(n.id);
+    ctx.globalAlpha = n.op * (dim ? 0.12 : 1);
     const t = n.leaf ? store.get(n.id) : null;
     const alarm = t && isAlarm(t);
     const r = tree ? (n.leaf ? 3.5 : 5.5) : n.leaf ? 2.4 + Math.min(2.6, ratePerMin(t, now) / 25) : 7.5 - Math.min(n.depth, 4) * 1.1;
@@ -910,9 +914,9 @@ function drawGraph() {
     ctx.beginPath(); ctx.arc(n.dx, n.dy, r, 0, 2 * Math.PI);
     ctx.fillStyle = alarm ? "#d03b3b" : LEVELS[n.leaf ? 5 : Math.min(n.depth, 4)];
     ctx.fill();
-    if (n.id === selected || n.id === hover) { ctx.strokeStyle = "#eceeef"; ctx.lineWidth = 1.5 / transform.k; ctx.stroke(); }
+    if (hit || n.id === selected || n.id === hover) { ctx.strokeStyle = n.id === selected || n.id === hover ? "#eceeef" : "#3b8be6"; ctx.lineWidth = 1.5 / transform.k; ctx.stroke(); }
     if (tree) drawTreeLabel(n, t, alarm, r);
-    else if (!n.leaf || transform.k > 2.4 || n.id === selected) {
+    else if ((!n.leaf && !dim) || hit || (!keep && transform.k > 2.4) || n.id === selected) {
       const fs = (n.leaf ? 9.5 : 12.5 - n.depth) / Math.max(transform.k, 0.6);
       ctx.font = `${n.leaf ? 400 : 600} ${fs}px "IBM Plex Sans", sans-serif`;
       ctx.textAlign = "center"; ctx.textBaseline = "top";
@@ -957,6 +961,7 @@ function setLayout(next) {
   $("layout").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.l === next)));
   $("tree-tools").hidden = next !== "tree";
   $("tab-hint").textContent = next === "tree" ? "Click a branch to fold it · ⌘/Ctrl + scroll zooms" : "Drag to pan, scroll to zoom, click a tag for details";
+  if (keep) applyTreeFilter(false);
   fitGraph();
 }
 $("layout").onclick = (e) => { const b = e.target.closest("button"); if (b) setLayout(b.dataset.l); };
@@ -968,7 +973,10 @@ function applyTreeFilter(refit) {
   if (refit) fitGraph();
 }
 $("tree-filter").oninput = (e) => { treeFilter = e.target.value; applyTreeFilter(true); };
-$("tree-filter").onkeydown = (e) => { if (e.key === "Escape") { e.target.value = ""; treeFilter = ""; applyTreeFilter(true); } };
+$("tree-filter").onkeydown = (e) => {
+  if (e.key === "Escape") { e.target.value = ""; treeFilter = ""; applyTreeFilter(true); }
+  if (e.key === "Enter" && keep) { const first = nodes.filter((n) => n.leaf && keep.has(n.id)).map((n) => n.id).sort()[0]; if (first) { selected = first; renderDetail(); } }
+};
 const clearTreeFilter = () => { $("tree-filter").value = ""; treeFilter = ""; keep = null; $("tree-count").textContent = ""; };
 $("expand-all").onclick = () => { clearTreeFilter(); treeCollapsed.clear(); layoutTree(); fitGraph(); };
 $("collapse-all").onclick = () => { clearTreeFilter(); treeCollapsed.clear(); nodes.forEach((n) => !n.leaf && n.depth >= 2 && treeCollapsed.add(n.id)); layoutTree(); fitGraph(); };
@@ -1232,7 +1240,7 @@ setInterval(() => {
   if (!$("view-explorer").hidden) syncTree();
   if (hover) renderHover();
   if (selected && Date.now() - detailChartAt > 5000) renderDetail();
-  if (keep && layout === "tree") applyTreeFilter(false); // values change, so value matches can too
+  if (keep) applyTreeFilter(false); // values change, so value matches can too
 }, 1000);
 setInterval(renderTrend, 5000);
 (function loop() { if (!$("view-graph").hidden) drawGraph(); requestAnimationFrame(loop); })();

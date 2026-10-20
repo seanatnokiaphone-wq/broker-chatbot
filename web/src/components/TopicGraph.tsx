@@ -1,7 +1,9 @@
+import { Search, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D, { type ForceGraphMethods, type NodeObject } from "react-force-graph-2d";
 import { isAlarm, type TopicRow } from "../api";
 import { LEVELS, LEVEL_NAMES, STATUS } from "../colors";
+import { topicMatcher } from "../filter";
 import type { Live } from "../useLive";
 
 interface GNode {
@@ -67,6 +69,34 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
     return () => clearTimeout(t);
   }, [data]);
 
+  // Search: matching tags and their parent branches stay bright, everything else dims.
+  const [query, setQuery] = useState("");
+  const hits = useMemo(() => {
+    const match = topicMatcher(query);
+    if (!match) return null;
+    const tags = new Set<string>();
+    const lit = new Set<string>();
+    for (const n of data.nodes) {
+      if (!n.leaf || !match(n.id, live.topics.get(n.id))) continue;
+      tags.add(n.id);
+      const parts = n.id.split("/");
+      parts.forEach((_, i) => lit.add(parts.slice(0, i + 1).join("/")));
+    }
+    return { tags, lit };
+  }, [query, data, live.version]);
+
+  const hitKey = hits ? [...hits.tags].sort().join("\n") : "";
+  useEffect(() => {
+    if (!hits?.tags.size) return;
+    const t = setTimeout(() => fg.current?.zoomToFit(600, 80, (n) => hits.tags.has(n.id as string)), 250);
+    return () => clearTimeout(t);
+  }, [hitKey]);
+
+  const onSearchKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") setQuery("");
+    if (e.key === "Enter" && hits?.tags.size) onSelect([...hits.tags].sort()[0]);
+  };
+
   const hovered = hover ? live.topics.get(hover) : undefined;
 
   return (
@@ -79,13 +109,16 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
         backgroundColor="#0d0d0d"
         autoPauseRedraw={false}
         cooldownTicks={200}
-        linkColor={() => "#2c2c2a"}
+        linkColor={(l) => (hits && !hits.lit.has((l.target as unknown as GNode).id) ? "#1a1a19" : "#2c2c2a")}
         linkWidth={1}
         nodeRelSize={4}
         onNodeHover={(n) => setHover(n?.leaf ? (n.id as string) : null)}
         onNodeClick={(n) => (n.leaf ? onSelect(n.id as string) : fg.current?.centerAt(n.x, n.y, 600))}
         nodeCanvasObject={(n, ctx, scale) => {
           const row = live.topics.get(n.id as string);
+          const dim = hits ? !hits.lit.has(n.id as string) : false;
+          const hit = hits?.tags.has(n.id as string) ?? false;
+          ctx.globalAlpha = dim ? 0.12 : 1;
           const alarm = row ? isAlarm(row) : false;
           const r = n.leaf ? 2.2 + Math.min(3, (row?.rate ?? 0) / 25) : 7 - Math.min(n.depth, 4);
           const color = alarm ? STATUS.critical : LEVELS[Math.min(n.depth, LEVELS.length - 1)];
@@ -102,12 +135,12 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
           ctx.arc(n.x!, n.y!, r, 0, 2 * Math.PI);
           ctx.fillStyle = color;
           ctx.fill();
-          if (n.id === selected || n.id === hover) {
-            ctx.strokeStyle = "#f0efec";
+          if (hit || n.id === selected || n.id === hover) {
+            ctx.strokeStyle = hit && n.id !== selected && n.id !== hover ? "#3987e5" : "#f0efec";
             ctx.lineWidth = 1.5 / scale;
             ctx.stroke();
           }
-          const showLabel = !n.leaf || scale > 2.2 || n.id === selected;
+          const showLabel = (!n.leaf && !dim) || hit || (!hits && scale > 2.2) || n.id === selected;
           if (showLabel) {
             const fontSize = Math.max(n.leaf ? 2.5 : 3.5, (n.leaf ? 10 : 12 - n.depth) / scale);
             ctx.font = `${n.leaf ? 400 : 600} ${fontSize}px Inter, sans-serif`;
@@ -116,6 +149,7 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
             ctx.fillStyle = n.leaf ? "#c3c2b7" : "#f0efec";
             ctx.fillText(n.name, n.x!, n.y! + r + 1.5);
           }
+          ctx.globalAlpha = 1;
         }}
         nodePointerAreaPaint={(n, color, ctx) => {
           ctx.fillStyle = color;
@@ -124,6 +158,23 @@ export function TopicGraph({ live, selected, onSelect }: Props) {
           ctx.fill();
         }}
       />
+      <div className="graph-search">
+        <label className="search">
+          <Search size={14} />
+          <input
+            placeholder="Search topics or values: temp, line2, Down, +/+/+/+/+/motor_temp"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={onSearchKey}
+          />
+          {query && (
+            <button className="icon" onClick={() => setQuery("")} aria-label="Clear search">
+              <X size={12} />
+            </button>
+          )}
+        </label>
+        {hits && <span className="small muted">{hits.tags.size ? `${hits.tags.size} of ${live.topics.size} topics · Enter opens the first` : "No topics match"}</span>}
+      </div>
       <div className="graph-legend">
         {LEVEL_NAMES.map((name, i) => (
           <span key={name}>
