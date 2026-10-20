@@ -1,0 +1,1093 @@
+<title>Broker ChatBot</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<style>
+/* Layout: control-room console. Status rail on top, workspace (graph | explorer) left, chat column right; stacks on phones. Deliberately dark-only. */
+:root {
+  --page: #0c0e10;
+  --panel: #15181b;
+  --raised: #1d2125;
+  --line: #262b30;
+  --line-2: #343a41;
+  --ink: #eceeef;
+  --ink-2: #b9bfc5;
+  --muted: #7f878f;
+  --accent: #3b8be6;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #9085e9;
+  --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+  --font: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body { background: var(--page); color: var(--ink); font: 14px/1.45 var(--font); }
+button { font: inherit; color: inherit; cursor: pointer; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+
+.app { height: 100%; display: flex; flex-direction: column; }
+.topbar { display: flex; align-items: center; gap: 20px; padding-block: 10px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; white-space: nowrap; }
+.brand svg { color: var(--accent); }
+.demo-pill { font-size: 11px; color: var(--warning); border: 1px solid rgba(250,178,25,.45); border-radius: 999px; padding: 1px 8px; font-weight: 500; }
+.stats { display: flex; gap: 22px; flex: 1; flex-wrap: wrap; min-width: 0; }
+.stat { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.stat-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.stat-value { font-weight: 500; font-variant-numeric: tabular-nums; }
+.led { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--good); box-shadow: 0 0 6px var(--good); }
+.led.bad { background: var(--critical); box-shadow: 0 0 6px var(--critical); }
+#spark { width: 96px; height: 26px; display: block; }
+.fault-btn { display: flex; align-items: center; gap: 6px; background: var(--raised); border: 1px solid var(--line-2); border-radius: 8px; padding: 5px 10px; font-size: 12.5px; }
+.fault-btn:hover { border-color: var(--critical); }
+.fault-wrap { position: relative; }
+.fault-menu { position: absolute; right: 0; top: calc(100% + 6px); background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 6px; z-index: 20; width: 280px; display: flex; flex-direction: column; gap: 2px; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+.fault-menu button { text-align: left; background: none; border: none; border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+.fault-menu button:hover { background: var(--raised); }
+
+.main { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 420px; min-height: 0; }
+.workspace { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.tabs { display: flex; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--line); align-items: center; }
+.tabs button { display: flex; align-items: center; gap: 6px; background: none; border: 1px solid transparent; border-radius: 8px; padding: 6px 10px; color: var(--muted); }
+.tabs button[aria-selected="true"] { background: var(--raised); border-color: var(--line-2); color: var(--ink); }
+.tabs .hint { margin-left: auto; font-size: 12px; color: var(--muted); }
+.view { flex: 1; min-height: 0; position: relative; }
+
+/* Graph */
+#graph { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+.legend { position: absolute; left: 12px; bottom: 12px; display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--ink-2); background: rgba(21,24,27,.9); padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); max-width: calc(100% - 24px); }
+.legend span { display: flex; align-items: center; gap: 5px; }
+.legend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.hover-card { position: absolute; left: 12px; top: 12px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 10px; padding: 10px 12px; max-width: min(360px, calc(100% - 24px)); pointer-events: none; }
+.hover-card .v { font-size: 20px; font-weight: 600; margin: 2px 0; font-variant-numeric: tabular-nums; }
+.detail { position: absolute; right: 12px; top: 12px; width: 360px; max-width: calc(100% - 24px); background: var(--panel); border: 1px solid var(--line-2); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+.detail-head { display: flex; justify-content: space-between; gap: 8px; align-items: start; word-break: break-all; }
+.detail .v { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.detail .v.bad { color: var(--critical); }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn { display: inline-flex; align-items: center; gap: 6px; background: var(--raised); border: 1px solid var(--line-2); border-radius: 8px; padding: 5px 10px; font-size: 12.5px; }
+.btn:hover { border-color: var(--accent); }
+.icon-btn { background: none; border: none; color: var(--muted); padding: 4px; border-radius: 6px; line-height: 0; }
+.icon-btn:hover { color: var(--ink); background: var(--raised); }
+
+/* Explorer */
+.explorer { position: absolute; inset: 0; display: grid; grid-template-columns: minmax(260px, 360px) minmax(0, 1fr); }
+.tree-col { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.search { display: flex; align-items: center; gap: 6px; margin: 10px; padding: 6px 10px; border: 1px solid var(--line-2); border-radius: 8px; color: var(--muted); }
+.search input { background: none; border: none; outline: none; color: var(--ink); flex: 1; font: inherit; min-width: 0; }
+#tree { overflow-y: auto; flex: 1; padding-bottom: 12px; }
+.row { display: flex; align-items: center; gap: 6px; padding: 3px 10px 3px 8px; cursor: pointer; font-size: 13px; color: var(--ink-2); border: none; background: none; width: 100%; text-align: left; }
+.row:hover { background: var(--raised); }
+.row.picked { background: rgba(59,139,230,.12); }
+.row.branch { color: var(--ink); font-weight: 500; }
+.row .dot { width: 8px; height: 8px; border-radius: 50%; border: 1px solid var(--line-2); flex: none; }
+.row .chev { width: 10px; flex: none; color: var(--muted); font-size: 10px; }
+.row .val { margin-left: auto; font: 12px var(--mono); color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.row .val.bad { color: var(--critical); }
+.row.text-topic { cursor: default; }
+.chart-col { padding: 12px 16px; min-width: 0; overflow-y: auto; }
+.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 8px; flex-wrap: wrap; }
+.seg { display: flex; border: 1px solid var(--line-2); border-radius: 8px; overflow: hidden; }
+.seg button { background: none; border: none; padding: 5px 12px; color: var(--muted); font-size: 12px; }
+.seg button[aria-pressed="true"] { background: var(--raised); color: var(--ink); }
+.empty { color: var(--muted); padding: 60px 0; text-align: center; }
+
+/* Charts */
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart .unit { font-size: 11px; color: var(--muted); }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11.5px; color: var(--ink-2); margin: 2px 0 10px 40px; }
+.chart-legend span { display: flex; align-items: center; gap: 6px; }
+.chart-legend i { width: 12px; height: 2px; border-radius: 1px; display: inline-block; }
+.tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--line-2); border-radius: 8px; padding: 6px 8px; font-size: 12px; white-space: nowrap; z-index: 5; }
+.tip .t { color: var(--muted); margin-bottom: 2px; }
+.tip div span { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+
+/* Chat */
+.chat { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+.chat-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.chat-head .title { font-weight: 600; }
+#messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+.suggest { display: flex; flex-direction: column; gap: 8px; }
+.suggest button { text-align: left; background: var(--raised); border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+.suggest button:hover { border-color: var(--accent); }
+.notice { font-size: 12.5px; color: var(--ink-2); background: rgba(250,178,25,.08); border: 1px solid rgba(250,178,25,.35); border-radius: 8px; padding: 8px 10px; }
+.msg { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.msg.user { align-self: flex-end; max-width: 85%; background: var(--raised); border: 1px solid var(--line-2); border-radius: 12px 12px 4px 12px; padding: 8px 12px; }
+.md { min-width: 0; overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md p { margin: 0 0 8px; }
+.md ul, .md ol { margin: 0 0 8px; padding-left: 20px; }
+.md h1, .md h2, .md h3 { font-size: 14px; margin: 10px 0 6px; }
+.md code { font-family: var(--mono); font-size: 12px; background: var(--raised); padding: 1px 4px; border-radius: 4px; }
+.md .tbl { overflow-x: auto; margin-bottom: 8px; }
+.md table { border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.md th, .md td { border: 1px solid var(--line-2); padding: 3px 6px; text-align: left; }
+.chip { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; font: 11px var(--mono); color: var(--muted); background: var(--page); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; max-width: 100%; }
+.chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip.done::before { content: "✓"; color: var(--good); }
+.chip.bad { border-color: var(--critical); }
+.chip.run::before { content: ""; width: 8px; height: 8px; border: 1.5px solid var(--muted); border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
+.chat-chart { background: var(--page); border: 1px solid var(--line); border-radius: 10px; padding: 8px 8px 0; }
+.chat-chart .title { font-size: 12px; font-weight: 500; margin: 0 0 4px 4px; }
+.thinking { color: var(--muted); font-size: 13px; }
+.err { color: #e66767; font-size: 12.5px; }
+.composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); padding-bottom: max(12px, env(safe-area-inset-bottom, 0px)); }
+.composer textarea { flex: 1; resize: none; background: var(--page); border: 1px solid var(--line-2); border-radius: 10px; color: var(--ink); padding: 8px 10px; font: inherit; outline: none; min-width: 0; }
+.composer textarea:focus { border-color: var(--accent); }
+.send { width: 36px; height: 36px; align-self: flex-end; border-radius: 50%; border: none; background: var(--accent); color: #fff; display: grid; place-items: center; flex: none; }
+.send:disabled { background: var(--line-2); color: var(--muted); cursor: not-allowed; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .chip.run::before { animation: none; } }
+
+@media (max-width: 900px) {
+  html, body { height: auto; }
+  .app { height: auto; min-height: 100%; }
+  .main { grid-template-columns: minmax(0, 1fr); }
+  .workspace { height: 72vh; }
+  .chat { height: 85vh; border-left: none; border-top: 1px solid var(--line); }
+  .explorer { grid-template-columns: minmax(0, 1fr); grid-template-rows: 42% 58%; }
+  .tree-col { border-right: none; border-bottom: 1px solid var(--line); }
+  .tabs .hint { display: none; }
+  .stats { gap: 10px 18px; order: 3; flex-basis: 100%; }
+  .fault-wrap { margin-left: auto; }
+}
+</style>
+
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="2.5"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 4.9a10 10 0 0 0 0 14.2M19.1 4.9a10 10 0 0 1 0 14.2"/></svg>
+      Broker ChatBot <span class="demo-pill">Demo</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><span class="led"></span><div><div class="stat-label">Broker</div><div class="stat-value mono small">sim://acme-dublin</div></div></div>
+      <div class="stat"><div><div class="stat-label">Topics</div><div class="stat-value" id="st-topics">0</div></div></div>
+      <div class="stat"><div><div class="stat-label">Msgs/s</div><div class="stat-value" id="st-mps">0</div></div><svg id="spark" aria-hidden="true"></svg></div>
+      <div class="stat"><div><div class="stat-label">History</div><div class="stat-value" id="st-hist">0 min</div></div></div>
+      <div class="stat" id="st-alarm-wrap"><span class="led" id="st-alarm-led"></span><div><div class="stat-label">Alarms</div><div class="stat-value" id="st-alarms">None</div></div></div>
+    </div>
+    <div class="fault-wrap">
+      <button class="fault-btn" id="fault-btn" aria-haspopup="true" aria-expanded="false">⚡ Inject fault</button>
+      <div class="fault-menu" id="fault-menu" hidden></div>
+    </div>
+  </header>
+
+  <div class="main">
+    <section class="workspace">
+      <nav class="tabs" role="tablist">
+        <button role="tab" id="tab-graph" aria-selected="true">◉ Topic graph</button>
+        <button role="tab" id="tab-explorer" aria-selected="false">☰ Explorer &amp; trends</button>
+        <span class="hint" id="tab-hint">Drag to pan, scroll to zoom, click a tag for details</span>
+      </nav>
+      <div class="view" id="view-graph">
+        <canvas id="graph"></canvas>
+        <div class="legend" id="legend"></div>
+        <div class="hover-card" id="hover" hidden></div>
+        <div class="detail" id="detail" hidden></div>
+      </div>
+      <div class="view" id="view-explorer" hidden>
+        <div class="explorer">
+          <div class="tree-col">
+            <label class="search"><span aria-hidden="true">⌕</span><input id="filter" placeholder="Filter topics" aria-label="Filter topics"></label>
+            <div id="tree"></div>
+          </div>
+          <div class="chart-col">
+            <div class="toolbar">
+              <span class="muted small" id="pick-note">Click numeric topics to chart them</span>
+              <div class="seg" id="range">
+                <button data-min="15" aria-pressed="false">15 min</button>
+                <button data-min="60" aria-pressed="true">1 h</button>
+                <button data-min="180" aria-pressed="false">3 h</button>
+              </div>
+            </div>
+            <div id="trend"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="chat">
+      <div class="chat-head">
+        <div><div class="title">Ask the broker</div><div class="small muted">Live values and up to 3 hours of history</div></div>
+        <button class="icon-btn" id="reset" title="New conversation" aria-label="New conversation">↺</button>
+      </div>
+      <div id="messages"></div>
+      <form class="composer" id="composer">
+        <textarea id="input" rows="2" placeholder="Ask about topics, trends, alarms…" aria-label="Message"></textarea>
+        <button class="send" id="send" type="submit" aria-label="Send">↑</button>
+      </form>
+    </aside>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ------------------------------------------------------------------ *
+ * Mock ISA-95 / UNS plant: acme/dublin/<area>/<line>/<cell>/<tag>.
+ * Runs on a virtual clock so we can backfill 3 hours of history at load.
+ * ------------------------------------------------------------------ */
+const ROOT = "acme/dublin";
+const RETENTION_MS = 180 * 60_000;
+const rand = (a, b) => a + Math.random() * (b - a);
+const noise = (n) => (Math.random() - 0.5) * 2 * n;
+const round = (v, dp = 2) => Math.round(v * 10 ** dp) / 10 ** dp;
+const wave = (ts, periodS, phase = 0) => Math.sin((2 * Math.PI * ts) / (periodS * 1000) + phase);
+class Lag { constructor(v, k = 0.15) { this.v = v; this.k = k; } step(target, dt = 1) { this.v += (target - this.v) * (1 - Math.pow(1 - this.k, dt)); return this.v; } }
+
+const FAULTS = [
+  ["Filler motor overheating (line 2)", "packaging/line2/filler/motor_temp"],
+  ["Labeler web break, line 1 down", "packaging/line1/state"],
+  ["Compressor 2 trip, air pressure dropping", "utilities/compressed_air/compressor2"],
+  ["Oven zone 2 temperature overshoot", "processing/oven1/zone2"],
+  ["Mixer 1 high motor current", "processing/mixer1/motor_current"],
+  ["Capper torque drift (line 2), rejects rising", "packaging/line2/capper/torque"],
+];
+
+class Plant {
+  constructor(start) {
+    this.tags = [];
+    this.faults = [];
+    this.updaters = [];
+    this.lineStates = new Map();
+    this.now = start;
+    this.nextFaultAt = start + rand(600, 1200) * 1000;
+    this.site();
+    this.packaging("line1", 120, 0);
+    this.packaging("line2", 100, 1.3);
+    this.mixer("mixer1", 0);
+    this.mixer("mixer2", 2.1);
+    this.oven();
+    this.cip();
+    this.utilities();
+  }
+  add(topic, read, unit, every = 2, retain = false) { this.tags.push({ topic: `${ROOT}/${topic}`, read, unit, every, retain }); }
+  fault(key) { return this.faults.find((f) => f.until > this.now && key.startsWith(f.key)); }
+  inject(name, key, seconds = rand(150, 300)) {
+    this.faults.push({ name, key, from: this.now, until: this.now + seconds * 1000 });
+  }
+  /** Advance internal state by dt seconds to time `now`. */
+  advance(now, dt, autoFaults = true) {
+    this.now = now;
+    this.faults = this.faults.filter((f) => f.until > now);
+    if (autoFaults && now >= this.nextFaultAt) {
+      const [name, key] = FAULTS[Math.floor(Math.random() * FAULTS.length)];
+      this.inject(name, key);
+      this.nextFaultAt = now + rand(600, 1200) * 1000;
+    }
+    for (const u of this.updaters) u(now, dt);
+  }
+
+  site() {
+    this.add("shift", (n) => { const h = new Date(n).getHours(); return h >= 6 && h < 14 ? "A" : h >= 14 && h < 22 ? "B" : "C"; }, undefined, 30, true);
+    this.add("headcount", () => 42 + Math.round(noise(3)), "people", 60, true);
+    this.add("environment/ambient_temp", (n) => round(18 + 3 * wave(n, 3600) + noise(0.2)), "°C", 10);
+    this.add("environment/humidity", (n) => round(55 + 8 * wave(n, 5400, 1) + noise(0.5)), "%RH", 10);
+  }
+
+  packaging(line, rated, phase) {
+    const base = `packaging/${line}`;
+    // Start mid-shift (6 h in) so OEE doesn't open on a warm-up spike.
+    const s = { state: "Running", until: this.now + rand(300, 1500) * 1000, alarm: "none", good: rand(8000, 20000), reject: 0, total: 21600, running: 21600 * 0.86, runSpeed: 0 };
+    s.runSpeed = s.running * rated * 0.93;
+    s.reject = s.good * 0.012;
+    const speed = new Lag(rated * 0.95, 0.25);
+    const temps = { filler: new Lag(55, 0.05), capper: new Lag(48, 0.05), labeler: new Lag(45, 0.05), palletizer: new Lag(42, 0.05) };
+    const normal = { filler: 55, capper: 48, labeler: 45, palletizer: 42 };
+    this.updaters.push((now, dt) => {
+      const jam = this.fault(`${base}/state`);
+      if (jam && s.state !== "Down") { s.state = "Down"; s.alarm = "E-214 Labeler web break"; s.until = jam.until; }
+      else if (now > s.until) {
+        if (s.state === "Running") {
+          const r = Math.random();
+          s.state = r < 0.5 ? "Idle" : r < 0.8 ? "Down" : "Changeover";
+          s.alarm = s.state === "Down" ? ["E-101 Bottle infeed starved", "E-330 Capper chute blocked", "E-502 Guard door open"][Math.floor(Math.random() * 3)] : "none";
+          s.until = now + rand(60, s.state === "Changeover" ? 900 : 360) * 1000;
+        } else { s.state = "Running"; s.alarm = "none"; s.until = now + rand(900, 2400) * 1000; }
+      }
+      this.lineStates.set(line, s.state);
+      speed.step(s.state === "Running" ? rated * (0.92 + 0.05 * wave(now, 900, phase)) : 0, dt);
+      s.total += dt;
+      if (s.state === "Running") { s.running += dt; s.runSpeed += speed.v * dt; }
+      const made = (speed.v / 60) * dt;
+      const rr = this.fault(`${base}/capper/torque`) ? 0.06 : 0.012;
+      s.good += made * (1 - rr); s.reject += made * rr;
+      const rf = s.state === "Running" ? 1 : 0.2;
+      for (const c of Object.keys(temps)) temps[c].step(normal[c] * (0.75 + 0.25 * rf) + (this.fault(`${base}/${c}/motor_temp`) ? 38 : 0), dt);
+    });
+    const avail = () => (s.total ? s.running / s.total : 1);
+    const perf = () => (s.running ? Math.min(1, s.runSpeed / (s.running * rated)) : 0.95);
+    const qual = () => s.good / (s.good + s.reject);
+    const run = () => s.state === "Running";
+    this.add(`${base}/state`, () => s.state, undefined, 2, true);
+    this.add(`${base}/alarm/active`, () => s.alarm, undefined, 5, true);
+    this.add(`${base}/speed`, () => round(speed.v + (run() ? noise(0.8) : 0), 1), "bpm", 1);
+    this.add(`${base}/good_count`, () => Math.round(s.good), "units", 2);
+    this.add(`${base}/reject_count`, () => Math.round(s.reject), "units", 2);
+    this.add(`${base}/oee/availability`, () => round(avail() * 100, 1), "%", 10);
+    this.add(`${base}/oee/performance`, () => round(perf() * 100, 1), "%", 10);
+    this.add(`${base}/oee/quality`, () => round(qual() * 100, 1), "%", 10);
+    this.add(`${base}/oee/oee`, () => round(avail() * perf() * qual() * 100, 1), "%", 10);
+    const mt = (c) => (n) => round(temps[c].v + 2 * wave(n, 600, phase) + noise(0.3), 1);
+    this.add(`${base}/filler/fill_weight`, () => round(run() ? 500 + noise(2.5) : 0, 1), "g", 1);
+    this.add(`${base}/filler/nozzle_pressure`, (n) => round(2.4 + 0.1 * wave(n, 120) + noise(0.03), 2), "bar", 2);
+    this.add(`${base}/filler/motor_temp`, mt("filler"), "°C", 2);
+    this.add(`${base}/filler/motor_current`, () => round(12 * (run() ? 1 : 0.2) + noise(0.4), 1), "A", 2);
+    this.add(`${base}/capper/torque`, (n) => round((this.fault(`${base}/capper/torque`) ? 1.6 + 0.4 * wave(n, 60) : 2.2) + noise(0.05), 2), "Nm", 2);
+    this.add(`${base}/capper/motor_temp`, mt("capper"), "°C", 2);
+    this.add(`${base}/capper/cap_hopper_level`, (n) => round(60 + 35 * wave(n, 1500, phase) + noise(1), 0), "%", 5);
+    this.add(`${base}/labeler/web_tension`, () => round(run() ? 85 + noise(3) : 20 + noise(1), 1), "N", 2);
+    this.add(`${base}/labeler/motor_temp`, mt("labeler"), "°C", 2);
+    this.add(`${base}/labeler/label_roll_remaining`, (n) => round(100 - ((n / 20000) % 100), 0), "%", 10);
+    this.add(`${base}/palletizer/pallet_count`, () => Math.floor(s.good / 1200), "pallets", 5);
+    this.add(`${base}/palletizer/layer`, () => Math.floor((s.good % 1200) / 150) + 1, undefined, 5);
+    this.add(`${base}/palletizer/motor_temp`, mt("palletizer"), "°C", 2);
+  }
+
+  mixer(name, phase) {
+    const base = `processing/${name}`;
+    const phases = ["Charging", "Mixing", "Heating", "Holding", "Discharging", "CIP"];
+    const durs = [180, 420, 300, 240, 180, 240];
+    const cycle = durs.reduce((a, b) => a + b, 0);
+    const offset = rand(0, cycle) * 1000;
+    const temp = new Lag(25, 0.04), level = new Lag(20, 0.05);
+    const at = (n) => {
+      const k = Math.floor((n + offset) / 1000 / cycle);
+      let x = ((n + offset) / 1000) % cycle, i = 0;
+      while (x > durs[i]) x -= durs[i++];
+      return { phase: phases[i], batch: 2400 + (k % 600) };
+    };
+    const rpm = (p) => ({ Mixing: 180, Heating: 120, Holding: 60, Charging: 30, Discharging: 40, CIP: 90 })[p];
+    this.updaters.push((now, dt) => {
+      const p = at(now).phase;
+      level.step(p === "Charging" ? 85 : p === "Discharging" || p === "CIP" ? 5 : level.v, dt);
+      temp.step(p === "Heating" || p === "Holding" ? 72 : p === "CIP" ? 60 : 25, dt);
+    });
+    this.add(`${base}/state`, (n) => (at(n).phase === "CIP" ? "Cleaning" : "Running"), undefined, 5, true);
+    this.add(`${base}/batch/id`, (n) => `B-${at(n).batch}`, undefined, 10, true);
+    this.add(`${base}/batch/phase`, (n) => at(n).phase, undefined, 2, true);
+    this.add(`${base}/speed`, (n) => round(rpm(at(n).phase) + noise(2), 0), "rpm", 1);
+    this.add(`${base}/motor_current`, (n) => round(rpm(at(n).phase) * 0.09 + (this.fault(`${base}/motor_current`) ? 9 : 0) + noise(0.3), 1), "A", 2);
+    this.add(`${base}/motor_temp`, (n) => round(45 + rpm(at(n).phase) * 0.05 + 2 * wave(n, 700, phase) + noise(0.3), 1), "°C", 2);
+    this.add(`${base}/tank_level`, () => round(level.v + noise(0.3), 1), "%", 2);
+    this.add(`${base}/product_temp`, () => round(temp.v + noise(0.2), 1), "°C", 2);
+  }
+
+  oven() {
+    const base = "processing/oven1";
+    const sps = [180, 210, 195];
+    const zones = sps.map((sp) => new Lag(sp, 0.06));
+    this.updaters.push((now, dt) => sps.forEach((sp, i) => zones[i].step(sp + (this.fault(`${base}/zone${i + 1}`) ? 28 : 0), dt)));
+    this.add(`${base}/state`, () => "Running", undefined, 10, true);
+    sps.forEach((sp, i) => {
+      this.add(`${base}/zone${i + 1}/temperature`, (n) => round(zones[i].v + 1.5 * wave(n, 240, i) + noise(0.4), 1), "°C", 1);
+      this.add(`${base}/zone${i + 1}/setpoint`, () => sp, "°C", 30, true);
+    });
+    this.add(`${base}/belt_speed`, (n) => round(1.8 + 0.05 * wave(n, 1800) + noise(0.01), 2), "m/min", 2);
+    this.add(`${base}/gas_flow`, (n) => round(42 + 4 * wave(n, 300) + (this.fault(`${base}/zone2`) ? 9 : 0) + noise(0.5), 1), "m³/h", 2);
+    this.add(`${base}/exhaust_temp`, (n) => round(140 + 5 * wave(n, 400) + noise(0.6), 1), "°C", 5);
+  }
+
+  cip() {
+    const base = "processing/cip";
+    const on = () => [...this.lineStates.values()].includes("Changeover");
+    this.add(`${base}/state`, () => (on() ? "Washing" : "Idle"), undefined, 5, true);
+    this.add(`${base}/supply_temp`, () => round(on() ? 78 + noise(0.8) : 30 + noise(0.3), 1), "°C", 2);
+    this.add(`${base}/conductivity`, () => round(on() ? 85 + noise(3) : 0.5 + noise(0.05), 2), "mS/cm", 2);
+    this.add(`${base}/flow`, () => round(on() ? 12 + noise(0.4) : 0, 1), "m³/h", 2);
+  }
+
+  utilities() {
+    const base = "utilities";
+    const pressure = new Lag(7.2, 0.1);
+    const load = () => [...this.lineStates.values()].filter((x) => x === "Running").length * 140 + 220;
+    let kwh = 1_250_000, water = 84_000;
+    this.updaters.push((now, dt) => {
+      pressure.step(7.2 - (this.fault(`${base}/compressed_air/compressor2`) ? 1.6 : 0), dt);
+      kwh += (load() * dt) / 3600;
+      water += (18 * dt) / 3600;
+    });
+    for (const c of ["compressor1", "compressor2"]) {
+      const trip = () => !!this.fault(`${base}/compressed_air/${c}`);
+      this.add(`${base}/compressed_air/${c}/state`, () => (trip() ? "Tripped" : "Running"), undefined, 5, true);
+      this.add(`${base}/compressed_air/${c}/power`, (n) => round(trip() ? 0 : 55 + 6 * wave(n, 200) + noise(1), 1), "kW", 2);
+      this.add(`${base}/compressed_air/${c}/motor_temp`, (n) => round(trip() ? 35 : 68 + 2 * wave(n, 500) + noise(0.4), 1), "°C", 5);
+    }
+    this.add(`${base}/compressed_air/header_pressure`, (n) => round(pressure.v + 0.1 * wave(n, 90) + noise(0.03), 2), "bar", 1);
+    this.add(`${base}/compressed_air/dew_point`, () => round(3 + noise(0.2), 1), "°C", 10);
+    this.add(`${base}/boiler/state`, () => "Running", undefined, 10, true);
+    this.add(`${base}/boiler/steam_pressure`, (n) => round(10 + 0.3 * wave(n, 180) + noise(0.05), 2), "bar", 2);
+    this.add(`${base}/boiler/water_level`, (n) => round(50 + 6 * wave(n, 240) + noise(0.5), 1), "%", 2);
+    this.add(`${base}/boiler/flue_temp`, (n) => round(190 + 6 * wave(n, 600) + noise(0.8), 1), "°C", 5);
+    this.add(`${base}/power/main/active_power`, () => round(load() + noise(8), 1), "kW", 2);
+    this.add(`${base}/power/main/energy`, () => round(kwh, 1), "kWh", 10);
+    this.add(`${base}/power/main/voltage_l1`, () => round(230 + noise(1.5), 1), "V", 5);
+    this.add(`${base}/power/main/power_factor`, () => round(0.94 + noise(0.01), 3), undefined, 10);
+    this.add(`${base}/chiller/supply_temp`, (n) => round(6 + 0.4 * wave(n, 900) + noise(0.1), 1), "°C", 5);
+    this.add(`${base}/chiller/return_temp`, (n) => round(11 + 0.6 * wave(n, 900) + noise(0.15), 1), "°C", 5);
+    this.add(`${base}/chiller/power`, (n) => round(85 + 10 * wave(n, 900) + noise(2), 1), "kW", 5);
+    this.add(`${base}/water/flow`, (n) => round(18 + 4 * wave(n, 1200) + noise(0.5), 1), "m³/h", 2);
+    this.add(`${base}/water/total`, () => round(water, 1), "m³", 10);
+    this.add(`${base}/water/hardness`, () => round(120 + noise(2), 0), "ppm", 30);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * In-memory "broker" history: every published message, 3 h rolling.
+ * ------------------------------------------------------------------ */
+const store = new Map(); // topic -> {topic, unit, ts: number[], v: (number|string)[], numeric}
+const throughput = []; // {ts, count} per second
+let totalMsgs = 0;
+
+function record(topic, unit, ts, value) {
+  let t = store.get(topic);
+  if (!t) { t = { topic, unit, ts: [], v: [], numeric: typeof value === "number" }; store.set(topic, t); }
+  t.ts.push(ts); t.v.push(value);
+  totalMsgs++;
+}
+const lastOf = (t) => ({ value: t.v[t.v.length - 1], ts: t.ts[t.ts.length - 1] });
+function lowerBound(arr, x) { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < x) lo = m + 1; else hi = m; } return lo; }
+function slice(t, from, to) { const a = lowerBound(t.ts, from), b = lowerBound(t.ts, to + 1); return { ts: t.ts.slice(a, b), v: t.v.slice(a, b) }; }
+function ratePerMin(t, now = Date.now()) { return t.ts.length - lowerBound(t.ts, now - 60_000); }
+function prune(now) {
+  const cut = now - RETENTION_MS;
+  for (const t of store.values()) { const i = lowerBound(t.ts, cut); if (i > 0) { t.ts.splice(0, i); t.v.splice(0, i); } }
+  while (throughput.length && throughput[0].ts < cut) throughput.shift();
+}
+function mqttMatch(filter, topic) {
+  if (filter === "#" || filter === topic) return true;
+  const f = filter.split("/"), t = topic.split("/");
+  for (let i = 0; i < f.length; i++) { if (f[i] === "#") return true; if (i >= t.length) return false; if (f[i] !== "+" && f[i] !== t[i]) return false; }
+  return f.length === t.length;
+}
+const matchTopics = (filter) => [...store.values()].filter((t) => mqttMatch(filter, t.topic)).sort((a, b) => a.topic.localeCompare(b.topic));
+function bucketed(t, from, to, maxPoints = 120) {
+  const s = slice(t, from, to);
+  const size = Math.max(1000, Math.ceil((to - from) / maxPoints));
+  const out = [];
+  let cur = null;
+  for (let i = 0; i < s.ts.length; i++) {
+    const v = s.v[i]; if (typeof v !== "number") continue;
+    const b = Math.floor(s.ts[i] / size) * size;
+    if (!cur || cur.ts !== b) { cur = { ts: b, sum: 0, n: 0, min: Infinity, max: -Infinity }; out.push(cur); }
+    cur.sum += v; cur.n++; cur.min = Math.min(cur.min, v); cur.max = Math.max(cur.max, v);
+  }
+  return out.map((c) => ({ ts: c.ts, avg: c.sum / c.n, min: c.min, max: c.max, n: c.n }));
+}
+const isAlarm = (t) => {
+  const { value } = lastOf(t);
+  if (typeof value !== "string") return false;
+  if (t.topic.endsWith("/alarm/active")) return value !== "none";
+  return /^(down|tripped|fault|stopped)$/i.test(value);
+};
+const fmt = (t, value = lastOf(t).value) => typeof value === "number" ? `${Number.isInteger(value) ? value : value.toFixed(2)}${t.unit ? " " + t.unit : ""}` : String(value);
+
+/* ------------------------------------------------------------------ *
+ * Simulation loop: backfill 3 h, then publish live every second.
+ * ------------------------------------------------------------------ */
+const startedAt = Date.now();
+const plant = new Plant(startedAt - RETENTION_MS);
+function publishAt(now, stepS, force) {
+  const sec = Math.floor(now / 1000);
+  let n = 0;
+  for (const tag of plant.tags) {
+    if (!force && Math.floor(sec / tag.every) === Math.floor((sec - stepS) / tag.every)) continue;
+    record(tag.topic, tag.unit, now, tag.read(now));
+    n++;
+  }
+  return n;
+}
+(function backfill() {
+  const step = 5;
+  let first = true;
+  for (let now = startedAt - RETENTION_MS + 1000; now < startedAt; now += step * 1000) {
+    plant.advance(now, step);
+    const n = publishAt(now, step, first);
+    first = false;
+    throughput.push({ ts: now, count: n / step });
+  }
+})();
+let mpsHistory = throughput.slice(-90).map((t) => Math.round(t.count));
+const pulses = new Map();
+function liveTick() {
+  const now = Date.now();
+  plant.advance(now, 1);
+  const sec = Math.floor(now / 1000);
+  let n = 0;
+  for (const tag of plant.tags) {
+    if (sec % tag.every !== 0) continue;
+    record(tag.topic, tag.unit, now, tag.read(now));
+    pulses.set(tag.topic, now);
+    n++;
+  }
+  throughput.push({ ts: now, count: n });
+  mpsHistory.push(n);
+  if (mpsHistory.length > 90) mpsHistory.shift();
+  if (sec % 60 === 0) prune(now);
+}
+
+/* ------------------------------------------------------------------ *
+ * Tools Claude can call (executed here in the page).
+ * ------------------------------------------------------------------ */
+const iso = (ts) => (ts ? new Date(ts).toISOString() : null);
+const r3 = (v, dp = 3) => (v == null || !isFinite(v) ? null : Math.round(v * 10 ** dp) / 10 ** dp);
+function win(input) {
+  const to = input.end ? Date.parse(String(input.end)) : Date.now();
+  const from = input.start ? Date.parse(String(input.start)) : to - Number(input.minutes || 60) * 60_000;
+  if (isNaN(from) || isNaN(to)) throw new Error("Could not parse start/end; use ISO 8601.");
+  return { from: Math.max(from, Date.now() - RETENTION_MS), to };
+}
+const winProps = {
+  minutes: { type: "number", description: "Look back this many minutes from now (default 60, max 180)." },
+  start: { type: "string", description: "ISO 8601 start (optional)." },
+  end: { type: "string", description: "ISO 8601 end (optional, default now)." },
+};
+const summary = (t) => ({ topic: t.topic, value: lastOf(t).value, unit: t.unit, ageS: Math.round((Date.now() - lastOf(t).ts) / 1000), msgsPerMin: ratePerMin(t) });
+function statsOf(t, from, to) {
+  const s = slice(t, from, to);
+  const nums = s.v.filter((x) => typeof x === "number");
+  if (!nums.length) return { topic: t.topic, samples: s.v.length, numeric: false, latest: lastOf(t).value };
+  let min = Infinity, max = -Infinity, sum = 0, sum2 = 0;
+  for (const x of nums) { min = Math.min(min, x); max = Math.max(max, x); sum += x; sum2 += x * x; }
+  const avg = sum / nums.length;
+  return { topic: t.topic, unit: t.unit, samples: nums.length, min: r3(min), max: r3(max), avg: r3(avg), stddev: r3(Math.sqrt(Math.max(0, sum2 / nums.length - avg * avg))), first: r3(nums[0]), last: r3(nums[nums.length - 1]), change: r3(nums[nums.length - 1] - nums[0]) };
+}
+
+let chartSink = null; // set per chat turn so show_chart renders into that reply
+const TOOL_LABEL = (name, i) => `${name}${i.topic || i.filter ? " · " + (i.topic || i.filter) : Array.isArray(i.topics) ? " · " + i.topics.length + " topics" : ""}`;
+function makeTools(onCall) {
+  const tool = (name, description, inputSchema, run) => ({
+    name, description, inputSchema,
+    execute: (input) => {
+      const done = onCall(name, input || {});
+      try { const res = run(input || {}); done(true); return res; }
+      catch (e) { done(false); throw e; }
+    },
+  });
+  return [
+    tool("broker_overview", "Overview of the broker: topic count, throughput, history window, busiest topics, alarms and the top branches of the topic tree. Returns JSON.", { type: "object", properties: {} }, () => {
+      const all = [...store.values()];
+      const branches = {};
+      for (const t of all) { const k = t.topic.split("/").slice(0, 4).join("/"); branches[k] = (branches[k] || 0) + 1; }
+      return {
+        broker: "sim://acme-dublin (in-browser simulator)", now: iso(Date.now()), topicCount: all.length,
+        messagesPerSecond: r3(mpsHistory.slice(-10).reduce((a, b) => a + b, 0) / Math.max(1, Math.min(10, mpsHistory.length)), 1),
+        historyFrom: iso(Math.min(...all.map((t) => t.ts[0]))), alarms: all.filter(isAlarm).map(summary),
+        busiest: all.sort((a, b) => ratePerMin(b) - ratePerMin(a)).slice(0, 8).map(summary), branches,
+      };
+    }),
+    tool("list_topics", "List topics matching an MQTT filter (+ and # wildcards) with latest value, unit, age and rate. Example filters: 'acme/dublin/packaging/#', '+/+/+/+/+/motor_temp'.", { type: "object", properties: { filter: { type: "string" }, limit: { type: "number" } } }, (i) => {
+      const m = matchTopics(String(i.filter || "#"));
+      return { matched: m.length, topics: m.slice(0, Number(i.limit) || 150).map(summary) };
+    }),
+    tool("get_history", "Bucketed time series (avg/min/max per bucket) for one numeric topic over a window. Use for trends.", { type: "object", properties: { topic: { type: "string" }, ...winProps, max_points: { type: "number", description: "Default 40, max 200." } }, required: ["topic"] }, (i) => {
+      const t = store.get(String(i.topic)); if (!t) throw new Error(`Unknown topic ${i.topic}`);
+      const { from, to } = win(i);
+      return { topic: t.topic, unit: t.unit, from: iso(from), to: iso(to), points: bucketed(t, from, to, Math.min(200, Number(i.max_points) || 40)).map((p) => ({ t: iso(p.ts), avg: r3(p.avg), min: r3(p.min), max: r3(p.max) })) };
+    }),
+    tool("get_stats", "Min/max/avg/stddev/first/last/change over a window for every topic matching a filter. Good for comparing machines.", { type: "object", properties: { filter: { type: "string" }, ...winProps }, required: ["filter"] }, (i) => {
+      const { from, to } = win(i);
+      const m = matchTopics(String(i.filter)).slice(0, 60);
+      return { from: iso(from), to: iso(to), matched: m.length, stats: m.map((t) => statsOf(t, from, to)) };
+    }),
+    tool("get_state_changes", "Transitions of a state/text topic (line state, alarms, batch phase) over a window with durations. Use for 'when did X go down / for how long'.", { type: "object", properties: { topic: { type: "string" }, ...winProps }, required: ["topic"] }, (i) => {
+      const t = store.get(String(i.topic)); if (!t) throw new Error(`Unknown topic ${i.topic}`);
+      const { from, to } = win(i);
+      const s = slice(t, from, to);
+      const ch = [];
+      for (let k = 0; k < s.v.length; k++) if (k === 0 || s.v[k] !== s.v[k - 1]) ch.push({ ts: s.ts[k], value: s.v[k] });
+      return { topic: t.topic, from: iso(from), to: iso(to), changes: ch.slice(-80).map((c, k, arr) => ({ at: iso(c.ts), value: c.value, minutes: r3(((arr[k + 1]?.ts ?? to) - c.ts) / 60000, 1) })) };
+    }),
+    tool("find_anomalies", "Scan numeric topics matching a filter for spikes (|z| over threshold) and recent shifts (last 5 min vs window). Use for 'is anything wrong?'.", { type: "object", properties: { filter: { type: "string" }, ...winProps, z_threshold: { type: "number", description: "Default 3." } } }, (i) => {
+      const { from, to } = win(i);
+      const z = Number(i.z_threshold) || 3;
+      const out = [];
+      for (const t of matchTopics(String(i.filter || "#"))) {
+        const s = slice(t, from, to);
+        const pts = []; s.v.forEach((v, k) => typeof v === "number" && pts.push([s.ts[k], v]));
+        if (pts.length < 20) continue;
+        const mean = pts.reduce((a, p) => a + p[1], 0) / pts.length;
+        const sd = Math.sqrt(pts.reduce((a, p) => a + (p[1] - mean) ** 2, 0) / pts.length);
+        if (sd < 1e-9) continue;
+        let peak = pts[0]; for (const p of pts) if (Math.abs(p[1] - mean) > Math.abs(peak[1] - mean)) peak = p;
+        const recent = pts.filter((p) => p[0] > to - 300_000);
+        const rm = recent.length ? recent.reduce((a, p) => a + p[1], 0) / recent.length : mean;
+        const pz = (peak[1] - mean) / sd, sz = (rm - mean) / sd;
+        if (Math.abs(pz) >= z || Math.abs(sz) >= z / 2) out.push({ topic: t.topic, unit: t.unit, kind: Math.abs(sz) >= z / 2 ? "recent_shift" : "spike", mean: r3(mean), sd: r3(sd), peak: r3(peak[1]), peakAt: iso(peak[0]), peakZ: r3(pz, 2), last5MinMean: r3(rm), shiftZ: r3(sz, 2) });
+      }
+      out.sort((a, b) => Math.abs(b.peakZ) - Math.abs(a.peakZ));
+      return { from: iso(from), to: iso(to), count: out.length, findings: out.slice(0, 30) };
+    }),
+    tool("show_chart", "Draw an interactive line chart in the user's chat for 1-6 numeric topics over a window. Use whenever a trend or comparison is clearer as a picture.", { type: "object", properties: { title: { type: "string" }, topics: { type: "array", items: { type: "string" } }, ...winProps }, required: ["title", "topics"] }, (i) => {
+      const topics = (Array.isArray(i.topics) ? i.topics : []).map(String).filter((t) => store.get(t)?.numeric).slice(0, 6);
+      if (!topics.length) throw new Error("None of those are numeric topics.");
+      const { from, to } = win(i);
+      chartSink?.({ title: String(i.title || "Chart"), topics, from, to });
+      return { shown: true, topics };
+    }),
+  ];
+}
+
+/* ------------------------------------------------------------------ *
+ * Charts (one panel per unit, so there's never a second y-axis).
+ * ------------------------------------------------------------------ */
+const SERIES = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6"].map((v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim());
+const shortName = (t) => t.split("/").slice(-3).join("/");
+const timeFmt = (d) => new Date(d).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+function drawChart(el, topics, from, to, height = 200) {
+  el.innerHTML = "";
+  const groups = d3.groups(topics, (t) => store.get(t)?.unit ?? "");
+  for (const [unit, ts] of groups) {
+    const wrap = document.createElement("div");
+    wrap.className = "chart";
+    el.appendChild(wrap);
+    const W = Math.max(260, wrap.clientWidth || el.clientWidth || 600), H = height;
+    const m = { t: 16, r: 10, b: 22, l: 44 };
+    const series = ts.map((t) => ({ t, color: SERIES[topics.indexOf(t) % SERIES.length], pts: bucketed(store.get(t), from, to, 240) }));
+    const all = series.flatMap((s) => s.pts);
+    const x = d3.scaleTime().domain([from, to]).range([m.l, W - m.r]);
+    const y = d3.scaleLinear().domain(d3.extent(all, (p) => p.avg).map((v, i) => v ?? i)).nice().range([H - m.b, m.t]);
+    const svg = d3.select(wrap).append("svg").attr("viewBox", `0 0 ${W} ${H}`).attr("height", H).attr("role", "img").attr("aria-label", `Line chart: ${ts.map(shortName).join(", ")}`);
+    svg.append("g").attr("transform", `translate(0,${H - m.b})`).call(d3.axisBottom(x).ticks(Math.max(2, Math.floor(W / 110))).tickFormat(timeFmt).tickSizeOuter(0))
+      .call((g) => g.selectAll("text").attr("fill", "var(--muted)").attr("font-size", 11)).call((g) => g.selectAll("line,path").attr("stroke", "var(--line-2)"));
+    svg.append("g").attr("transform", `translate(${m.l},0)`).call(d3.axisLeft(y).ticks(4).tickSize(-(W - m.l - m.r)))
+      .call((g) => g.select(".domain").remove()).call((g) => g.selectAll("line").attr("stroke", "var(--line)")).call((g) => g.selectAll("text").attr("fill", "var(--muted)").attr("font-size", 11));
+    if (unit) svg.append("text").attr("x", m.l).attr("y", 10).attr("fill", "var(--muted)").attr("font-size", 11).text(unit);
+    const line = d3.line().x((p) => x(p.ts)).y((p) => y(p.avg)).curve(d3.curveMonotoneX);
+    for (const s of series) {
+      svg.append("path").datum(s.pts).attr("fill", "none").attr("stroke", s.color).attr("stroke-width", 2).attr("stroke-linejoin", "round").attr("d", line);
+      const last = s.pts[s.pts.length - 1];
+      if (last) svg.append("circle").attr("cx", x(last.ts)).attr("cy", y(last.avg)).attr("r", 3.5).attr("fill", s.color).attr("stroke", "var(--page)").attr("stroke-width", 2);
+    }
+    if (!all.length) svg.append("text").attr("x", W / 2).attr("y", H / 2).attr("text-anchor", "middle").attr("fill", "var(--muted)").text("No data in this window");
+    // Crosshair + tooltip
+    const cross = svg.append("line").attr("y1", m.t).attr("y2", H - m.b).attr("stroke", "var(--line-2)").attr("visibility", "hidden");
+    const dots = series.map((s) => svg.append("circle").attr("r", 4).attr("fill", s.color).attr("stroke", "var(--page)").attr("stroke-width", 2).attr("visibility", "hidden"));
+    const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true; wrap.appendChild(tip);
+    svg.append("rect").attr("x", m.l).attr("y", m.t).attr("width", W - m.l - m.r).attr("height", H - m.t - m.b).attr("fill", "transparent")
+      .on("pointermove", (ev) => {
+        const [px] = d3.pointer(ev);
+        const tx = x.invert(px).getTime();
+        let rows = [], at = null;
+        series.forEach((s, k) => {
+          const i = d3.bisector((p) => p.ts).center(s.pts, tx); const p = s.pts[i];
+          if (!p) { dots[k].attr("visibility", "hidden"); return; }
+          at = at ?? p.ts;
+          dots[k].attr("cx", x(p.ts)).attr("cy", y(p.avg)).attr("visibility", "visible");
+          rows.push(`<div><span style="background:${s.color}"></span>${shortName(s.t)}: <b>${p.avg.toFixed(2)}</b>${unit ? " " + unit : ""}</div>`);
+        });
+        if (at == null) return;
+        cross.attr("x1", x(at)).attr("x2", x(at)).attr("visibility", "visible");
+        tip.innerHTML = `<div class="t">${new Date(at).toLocaleTimeString()}</div>${rows.join("")}`;
+        tip.hidden = false;
+        const scale = wrap.clientWidth / W;
+        const left = x(at) * scale;
+        tip.style.top = "8px";
+        tip.style.left = left > wrap.clientWidth / 2 ? `${left - tip.offsetWidth - 12}px` : `${left + 12}px`;
+      })
+      .on("pointerleave", () => { cross.attr("visibility", "hidden"); dots.forEach((d) => d.attr("visibility", "hidden")); tip.hidden = true; });
+    if (ts.length > 1) {
+      const lg = document.createElement("div"); lg.className = "chart-legend";
+      lg.innerHTML = series.map((s) => `<span><i style="background:${s.color}"></i>${shortName(s.t)}</span>`).join("");
+      wrap.appendChild(lg);
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Top bar
+ * ------------------------------------------------------------------ */
+const $ = (id) => document.getElementById(id);
+function renderTopbar() {
+  $("st-topics").textContent = store.size;
+  const mps = mpsHistory.slice(-10).reduce((a, b) => a + b, 0) / Math.max(1, Math.min(10, mpsHistory.length));
+  $("st-mps").textContent = mps.toFixed(1);
+  const first = Math.min(...[...store.values()].map((t) => t.ts[0]));
+  $("st-hist").textContent = `${Math.round((Date.now() - first) / 60000)} min`;
+  const alarms = [...store.values()].filter(isAlarm);
+  $("st-alarms").textContent = alarms.length ? `${alarms.length} active` : "None";
+  $("st-alarm-led").classList.toggle("bad", alarms.length > 0);
+  $("st-alarm-wrap").title = alarms.map((a) => `${a.topic}: ${lastOf(a).value}`).join("\n");
+  const sp = d3.select("#spark"); sp.selectAll("*").remove();
+  if (mpsHistory.length > 1) {
+    const x = d3.scaleLinear().domain([0, 89]).range([0, 96]);
+    const y = d3.scaleLinear().domain([0, d3.max(mpsHistory) || 1]).range([24, 2]);
+    sp.append("path").datum(mpsHistory).attr("fill", "var(--accent)").attr("fill-opacity", 0.15).attr("d", d3.area().x((d, i) => x(i + 90 - mpsHistory.length)).y0(24).y1(y));
+    sp.append("path").datum(mpsHistory).attr("fill", "none").attr("stroke", "var(--accent)").attr("stroke-width", 1.5).attr("d", d3.line().x((d, i) => x(i + 90 - mpsHistory.length)).y(y));
+  }
+}
+const faultMenu = $("fault-menu");
+faultMenu.innerHTML = FAULTS.map(([n], i) => `<button data-i="${i}">${n}</button>`).join("");
+$("fault-btn").onclick = () => { faultMenu.hidden = !faultMenu.hidden; $("fault-btn").setAttribute("aria-expanded", String(!faultMenu.hidden)); };
+faultMenu.onclick = (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  const [name, key] = FAULTS[Number(b.dataset.i)];
+  plant.inject(name, key, 240);
+  faultMenu.hidden = true;
+  $("fault-btn").textContent = `⚡ ${name.split(",")[0]} (4 min)`;
+  setTimeout(() => ($("fault-btn").textContent = "⚡ Inject fault"), 240_000);
+};
+document.addEventListener("click", (e) => { if (!e.target.closest(".fault-wrap")) faultMenu.hidden = true; });
+
+/* ------------------------------------------------------------------ *
+ * Topic graph (d3-force on canvas)
+ * ------------------------------------------------------------------ */
+const LEVELS = ["#eceeef", "#9085e9", "#3987e5", "#199e70", "#c98500", "#7f878f"];
+const LEVEL_NAMES = ["Enterprise", "Site", "Area", "Line / unit", "Cell", "Tag"];
+$("legend").innerHTML = LEVEL_NAMES.map((n, i) => `<span><i style="background:${LEVELS[i]}"></i>${n}</span>`).join("") + `<span><i style="background:var(--critical)"></i>Alarm / down</span>`;
+const canvas = $("graph"), ctx = canvas.getContext("2d");
+let selected = null, hover = null, transform = d3.zoomIdentity, W = 800, H = 600;
+const nodes = [], links = [], byId = new Map();
+for (const topic of [...store.keys()].sort()) {
+  const parts = topic.split("/");
+  parts.forEach((name, i) => {
+    const id = parts.slice(0, i + 1).join("/");
+    if (!byId.has(id)) {
+      const n = { id, name, depth: i, leaf: false };
+      byId.set(id, n); nodes.push(n);
+      if (i > 0) links.push({ source: parts.slice(0, i).join("/"), target: id });
+    }
+  });
+  byId.get(topic).leaf = true;
+}
+const sim = d3.forceSimulation(nodes)
+  .force("link", d3.forceLink(links).id((d) => d.id).distance((l) => (l.target.leaf ? 16 : 46 - l.target.depth * 5)).strength(0.9))
+  .force("charge", d3.forceManyBody().strength((d) => (d.leaf ? -18 : -160)))
+  .force("center", d3.forceCenter(0, 0))
+  .force("collide", d3.forceCollide((d) => (d.leaf ? 4 : 10)));
+for (let i = 0; i < 300; i++) sim.tick();
+sim.alpha(0.05);
+function resizeCanvas() {
+  const r = canvas.getBoundingClientRect(); if (!r.width) return;
+  W = r.width; H = r.height;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+function fitGraph() {
+  const xs = d3.extent(nodes, (n) => n.x), ys = d3.extent(nodes, (n) => n.y);
+  const k = Math.min(W / (xs[1] - xs[0] + 80), H / (ys[1] - ys[0] + 80), 4);
+  transform = d3.zoomIdentity.translate(W / 2 - k * (xs[0] + xs[1]) / 2, H / 2 - k * (ys[0] + ys[1]) / 2).scale(k);
+  d3.select(canvas).call(zoom.transform, transform);
+}
+const zoom = d3.zoom().scaleExtent([0.3, 8]).on("zoom", (ev) => { transform = ev.transform; });
+d3.select(canvas).call(zoom).on("dblclick.zoom", null);
+function nodeAt(ev) {
+  const [px, py] = d3.pointer(ev, canvas);
+  const [gx, gy] = transform.invert([px, py]);
+  const n = sim.find(gx, gy, 12 / transform.k);
+  return n;
+}
+canvas.addEventListener("pointermove", (ev) => {
+  const n = nodeAt(ev);
+  hover = n?.leaf ? n.id : null;
+  canvas.style.cursor = n ? "pointer" : "grab";
+  renderHover();
+});
+canvas.addEventListener("pointerleave", () => { hover = null; renderHover(); });
+canvas.addEventListener("click", (ev) => { const n = nodeAt(ev); if (n?.leaf) { selected = n.id; renderDetail(); } });
+function drawGraph() {
+  if (!W) return;
+  const now = Date.now();
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(transform.x, transform.y); ctx.scale(transform.k, transform.k);
+  ctx.strokeStyle = "#262b30"; ctx.lineWidth = 1 / transform.k;
+  ctx.beginPath();
+  for (const l of links) { ctx.moveTo(l.source.x, l.source.y); ctx.lineTo(l.target.x, l.target.y); }
+  ctx.stroke();
+  for (const n of nodes) {
+    const t = n.leaf ? store.get(n.id) : null;
+    const alarm = t && isAlarm(t);
+    const r = n.leaf ? 2.4 + Math.min(2.6, ratePerMin(t, now) / 25) : 7.5 - Math.min(n.depth, 4) * 1.1;
+    const p = pulses.get(n.id), age = p ? now - p : Infinity;
+    if (n.leaf && age < 1100) {
+      ctx.beginPath(); ctx.arc(n.x, n.y, r + (age / 1100) * 7, 0, 2 * Math.PI);
+      ctx.strokeStyle = alarm ? `rgba(208,59,59,${1 - age / 1100})` : `rgba(59,139,230,${1 - age / 1100})`;
+      ctx.lineWidth = 1.2 / transform.k + 0.3; ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, 2 * Math.PI);
+    ctx.fillStyle = alarm ? "#d03b3b" : LEVELS[Math.min(n.depth, 5)];
+    ctx.fill();
+    if (n.id === selected || n.id === hover) { ctx.strokeStyle = "#eceeef"; ctx.lineWidth = 1.5 / transform.k; ctx.stroke(); }
+    if (!n.leaf || transform.k > 2.4 || n.id === selected) {
+      const fs = (n.leaf ? 9.5 : 12.5 - n.depth) / Math.max(transform.k, 0.6);
+      ctx.font = `${n.leaf ? 400 : 600} ${fs}px "IBM Plex Sans", sans-serif`;
+      ctx.textAlign = "center"; ctx.textBaseline = "top";
+      ctx.lineWidth = 3 / transform.k; ctx.strokeStyle = "#0c0e10"; ctx.strokeText(n.name, n.x, n.y + r + 2 / transform.k);
+      ctx.fillStyle = n.leaf ? "#b9bfc5" : "#eceeef"; ctx.fillText(n.name, n.x, n.y + r + 2 / transform.k);
+    }
+  }
+  ctx.restore();
+}
+function renderHover() {
+  const el = $("hover");
+  const t = hover && store.get(hover);
+  el.hidden = !t;
+  if (!t) return;
+  el.innerHTML = `<div class="mono small muted"></div><div class="v"></div><div class="small muted"></div>`;
+  el.children[0].textContent = t.topic;
+  el.children[1].textContent = fmt(t);
+  el.children[2].textContent = `${ratePerMin(t)} msg/min · ${Math.round((Date.now() - lastOf(t).ts) / 1000)} s ago`;
+}
+let detailChartAt = 0;
+function renderDetail() {
+  const el = $("detail");
+  const t = selected && store.get(selected);
+  el.hidden = !t;
+  if (!t) return;
+  el.innerHTML = `<div class="detail-head"><div class="mono small"></div><button class="icon-btn" aria-label="Close">✕</button></div>
+    <div class="v ${isAlarm(t) ? "bad" : ""}"></div><div class="small muted"></div><div class="dchart"></div>
+    <div class="actions">${t.numeric ? '<button class="btn" data-a="trend">Open in trends</button>' : ""}<button class="btn" data-a="ask">Ask about this</button></div>`;
+  el.querySelector(".mono").textContent = t.topic;
+  el.querySelector(".v").textContent = fmt(t);
+  el.querySelector(".small.muted").textContent = `${ratePerMin(t)} msg/min · ${t.ts.length.toLocaleString()} messages recorded`;
+  el.querySelector(".icon-btn").onclick = () => { selected = null; renderDetail(); };
+  const btns = el.querySelectorAll("[data-a]");
+  btns.forEach((b) => (b.onclick = () => {
+    if (b.dataset.a === "trend") { if (!picked.includes(t.topic)) picked.push(t.topic); picked = picked.slice(-6); showTab("explorer"); renderTrend(); syncTree(); }
+    else { $("input").value = `What has ${t.topic} been doing over the last hour?`; $("input").focus(); }
+  }));
+  if (t.numeric) drawChart(el.querySelector(".dchart"), [t.topic], Date.now() - 30 * 60_000, Date.now(), 140);
+  else {
+    const s = slice(t, Date.now() - 60 * 60_000, Date.now());
+    const ch = []; s.v.forEach((v, k) => { if (k === 0 || v !== s.v[k - 1]) ch.push([s.ts[k], v]); });
+    el.querySelector(".dchart").innerHTML = `<div class="small muted" style="margin-top:6px">Last hour</div>` + ch.slice(-8).reverse().map(([ts, v]) => `<div class="small mono">${new Date(ts).toLocaleTimeString()} → ${String(v).replace(/</g, "&lt;")}</div>`).join("");
+  }
+  detailChartAt = Date.now();
+}
+
+/* ------------------------------------------------------------------ *
+ * Explorer
+ * ------------------------------------------------------------------ */
+let picked = [`${ROOT}/packaging/line1/speed`, `${ROOT}/packaging/line2/speed`];
+let minutes = 60;
+const collapsed = new Set();
+const rowEls = new Map();
+function buildTree() {
+  const root = { children: new Map() };
+  for (const topic of [...store.keys()].sort()) {
+    let node = root;
+    topic.split("/").forEach((name, i, parts) => {
+      const path = parts.slice(0, i + 1).join("/");
+      if (!node.children.has(name)) node.children.set(name, { name, path, children: new Map() });
+      node = node.children.get(name);
+    });
+  }
+  const frag = document.createDocumentFragment();
+  const walk = (node, depth, parentEl) => {
+    for (const c of node.children.values()) {
+      const leaf = c.children.size === 0;
+      const t = store.get(c.path);
+      const b = document.createElement("button");
+      b.className = `row ${leaf ? "" : "branch"} ${leaf && !t.numeric ? "text-topic" : ""}`;
+      b.style.paddingLeft = `${8 + depth * 14}px`;
+      b.dataset.path = c.path;
+      b.innerHTML = leaf ? `<span class="dot"></span><span class="name"></span><span class="val"></span>` : `<span class="chev">▾</span><span class="name"></span>`;
+      b.querySelector(".name").textContent = c.name;
+      parentEl.appendChild(b);
+      rowEls.set(c.path, b);
+      if (!leaf) {
+        const kids = document.createElement("div"); kids.dataset.kids = c.path; parentEl.appendChild(kids);
+        walk(c, depth + 1, kids);
+      }
+    }
+  };
+  walk(root, 0, frag);
+  $("tree").appendChild(frag);
+  $("tree").onclick = (e) => {
+    const b = e.target.closest(".row"); if (!b) return;
+    const p = b.dataset.path, t = store.get(p);
+    if (!t) { // branch
+      collapsed.has(p) ? collapsed.delete(p) : collapsed.add(p);
+      $("tree").querySelector(`[data-kids="${CSS.escape(p)}"]`).hidden = collapsed.has(p);
+      b.querySelector(".chev").textContent = collapsed.has(p) ? "▸" : "▾";
+      return;
+    }
+    if (!t.numeric) return;
+    picked = picked.includes(p) ? picked.filter((x) => x !== p) : [...picked, p].slice(-6);
+    syncTree(); renderTrend();
+  };
+}
+function syncTree() {
+  const f = $("filter").value.toLowerCase();
+  for (const [path, el] of rowEls) {
+    const t = store.get(path);
+    if (t) {
+      const i = picked.indexOf(path);
+      el.classList.toggle("picked", i >= 0);
+      el.querySelector(".dot").style.background = i >= 0 ? SERIES[i % SERIES.length] : "transparent";
+      const v = el.querySelector(".val"); v.textContent = fmt(t); v.classList.toggle("bad", isAlarm(t));
+      el.hidden = !!f && !path.toLowerCase().includes(f);
+    } else el.hidden = !!f && ![...store.keys()].some((k) => k.startsWith(path + "/") && k.toLowerCase().includes(f));
+  }
+  $("pick-note").textContent = picked.length ? `${picked.length} of 6 topics · click a topic to add or remove it` : "Click numeric topics to chart them";
+}
+$("filter").oninput = syncTree;
+function renderTrend() {
+  if ($("view-explorer").hidden) return;
+  if (!picked.length) { $("trend").innerHTML = `<div class="empty">Pick topics from the tree to compare their history.</div>`; return; }
+  drawChart($("trend"), picked, Date.now() - minutes * 60_000, Date.now(), 260);
+}
+$("range").onclick = (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  minutes = Number(b.dataset.min);
+  $("range").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+  renderTrend();
+};
+
+function showTab(name) {
+  const g = name === "graph";
+  $("tab-graph").setAttribute("aria-selected", String(g));
+  $("tab-explorer").setAttribute("aria-selected", String(!g));
+  $("view-graph").hidden = !g; $("view-explorer").hidden = g;
+  $("tab-hint").textContent = g ? "Drag to pan, scroll to zoom, click a tag for details" : "Charts refresh every 5 seconds";
+  if (g) { resizeCanvas(); } else { syncTree(); renderTrend(); }
+}
+$("tab-graph").onclick = () => showTab("graph");
+$("tab-explorer").onclick = () => showTab("explorer");
+
+/* ------------------------------------------------------------------ *
+ * Chat
+ * ------------------------------------------------------------------ */
+const SUGGESTIONS = [
+  "Give me an overview of what's on the broker",
+  "Is anything abnormal in the last 30 minutes?",
+  "Compare OEE for line 1 and line 2 over the last 3 hours and chart it",
+  "When did packaging line 1 last go down, and for how long?",
+  "Chart the oven zone temperatures for the last hour",
+  "Which motors are running hottest right now?",
+];
+let turns = [];
+let sample = null, sampleChecked = false, busy = false, ctl = null;
+const msgs = $("messages");
+function instructions() {
+  const topics = [...store.values()].sort((a, b) => a.topic.localeCompare(b.topic)).map((t) => `${t.topic}${t.unit ? ` [${t.unit}]` : ""}${t.numeric ? "" : " (text)"}`).join("\n");
+  return `You are the assistant inside an MQTT broker dashboard. Answer questions about what is happening on the broker now and over the recorded history (up to 180 minutes), using the tools to read real data. Never invent values; if the data doesn't show something, say so.
+
+The broker is a Unified Namespace laid out to ISA-95: enterprise/site/area/line/cell/tag. It is a simulated food and beverage plant (packaging lines, mixers, an oven, CIP and utilities) running in the browser, with faults injected now and then.
+
+How to work:
+- Prefer get_stats and find_anomalies for broad questions, get_history for one signal, get_state_changes for states, alarms and batch phases. Use exact topic names from the list below.
+- When a trend or comparison would help, call show_chart; the user sees the chart in the chat.
+- Use as few tool calls as you can; you have a limited number of rounds.
+- Answer concisely in Markdown: lead with the answer, include key numbers with units and local times, then brief detail. The user's local time zone offset is UTC${-new Date().getTimezoneOffset() / 60 >= 0 ? "+" : ""}${-new Date().getTimezoneOffset() / 60}.
+
+All ${store.size} topics:
+${topics}`;
+}
+function scrollDown() { msgs.scrollTop = msgs.scrollHeight; }
+function renderEmpty() {
+  msgs.innerHTML = "";
+  const box = document.createElement("div"); box.className = "suggest";
+  box.innerHTML = `<div class="notice">This demo runs a simulated plant in your browser with 3 hours of backfilled history. Asking Claude uses your own Claude usage and asks your permission the first time.</div>`;
+  for (const s of SUGGESTIONS) { const b = document.createElement("button"); b.textContent = s; b.onclick = () => send(s); box.appendChild(b); }
+  msgs.appendChild(box);
+}
+function md(el, text) {
+  el.innerHTML = DOMPurify.sanitize(marked.parse(text));
+  el.querySelectorAll("table").forEach((t) => { const w = document.createElement("div"); w.className = "tbl"; t.replaceWith(w); w.appendChild(t); });
+}
+const ERR = {
+  not_granted: "Claude isn't allowed for this page. You can allow it from the artifact's permissions menu.",
+  sampling_disabled: "Claude isn't available for this account.",
+  rate_limited: "Too many requests right now. Try again in a minute.",
+  session_expired: "Your session expired. Sign in again and retry.",
+  refused: "Claude declined that request. Try rephrasing it.",
+  prompt_too_large: "The conversation got too long. Start a new one with ↺.",
+  tools_unavailable: "This viewer can't run the chat's data tools.",
+};
+async function getSample() {
+  if (!sampleChecked) {
+    sampleChecked = true;
+    try { sample = window.claude ? await window.claude.use("sample") : null; } catch { sample = null; }
+  }
+  return sample;
+}
+async function send(text) {
+  text = text.trim();
+  if (!text || busy) return;
+  if (msgs.querySelector(".suggest")) msgs.innerHTML = "";
+  $("input").value = "";
+  const u = document.createElement("div"); u.className = "msg user"; u.textContent = text; msgs.appendChild(u);
+  const a = document.createElement("div"); a.className = "msg assistant"; msgs.appendChild(a);
+  const status = document.createElement("div"); status.className = "thinking"; status.textContent = "Thinking…"; a.appendChild(status);
+  const body = document.createElement("div"); body.className = "md"; a.appendChild(body);
+  scrollDown();
+  const s = await getSample();
+  if (!s) { status.remove(); a.innerHTML = `<div class="err">Chat needs Claude, which this view can't reach. Open the artifact on claude.ai while signed in.</div>`; return; }
+  busy = true; setComposer();
+  ctl = new AbortController();
+  turns.push({ role: "user", content: `[now: ${new Date().toISOString()}]\n${text}` });
+  // Charts and tool chips are inserted before the streaming text body.
+  chartSink = (c) => {
+    const box = document.createElement("div"); box.className = "chat-chart";
+    box.innerHTML = `<div class="title"></div><div class="c"></div>`;
+    box.querySelector(".title").textContent = c.title;
+    a.insertBefore(box, body);
+    requestAnimationFrame(() => drawChart(box.querySelector(".c"), c.topics, c.from, c.to, 180));
+  };
+  const tools = makeTools((name, input) => {
+    const chip = document.createElement("div"); chip.className = "chip run";
+    chip.innerHTML = "<span></span>"; chip.firstChild.textContent = TOOL_LABEL(name, input);
+    a.insertBefore(chip, body); status.textContent = "Reading broker data…"; scrollDown();
+    return (ok) => { chip.classList.remove("run"); chip.classList.add(ok ? "done" : "bad"); };
+  });
+  try {
+    const recent = turns.slice(-12);
+    const res = await s([{ role: "user", content: instructions() }, ...recent], {
+      tools, signal: ctl.signal,
+      onText: ({ text }) => { status.remove(); md(body, text); scrollDown(); },
+    });
+    status.remove();
+    md(body, res.text);
+    turns.push({ role: "assistant", content: res.text });
+    if (res.truncated) { const n = document.createElement("div"); n.className = "small muted"; n.textContent = "Answer cut short. Ask for less at a time."; a.appendChild(n); }
+  } catch (e) {
+    status.remove();
+    if (e && e.text && e.code !== "refused") md(body, e.text);
+    else if (e?.code === "refused") body.innerHTML = "";
+    turns.pop();
+    if (e?.code !== "cancelled") { const er = document.createElement("div"); er.className = "err"; er.textContent = ERR[e?.code] || "Something went wrong reaching Claude. Try again."; a.appendChild(er); }
+  } finally {
+    chartSink = null; busy = false; ctl = null; setComposer(); scrollDown();
+  }
+}
+function setComposer() {
+  const btn = $("send");
+  btn.textContent = busy ? "■" : "↑";
+  btn.setAttribute("aria-label", busy ? "Stop" : "Send");
+  btn.type = busy ? "button" : "submit";
+  btn.onclick = busy ? () => ctl?.abort() : null;
+}
+$("composer").onsubmit = (e) => { e.preventDefault(); send($("input").value); };
+$("input").onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send($("input").value); } };
+$("reset").onclick = () => { ctl?.abort(); turns = []; renderEmpty(); };
+
+/* ------------------------------------------------------------------ *
+ * Boot
+ * ------------------------------------------------------------------ */
+buildTree();
+renderEmpty();
+resizeCanvas();
+fitGraph();
+renderTopbar();
+window.addEventListener("resize", () => { resizeCanvas(); renderTrend(); });
+new ResizeObserver(() => { const w = W; resizeCanvas(); if (!w || Math.abs(w - W) > 40) fitGraph(); }).observe($("view-graph"));
+setInterval(() => {
+  liveTick();
+  renderTopbar();
+  if (!$("view-explorer").hidden) syncTree();
+  if (hover) renderHover();
+  if (selected && Date.now() - detailChartAt > 5000) renderDetail();
+}, 1000);
+setInterval(renderTrend, 5000);
+(function loop() { if (!$("view-graph").hidden) drawGraph(); requestAnimationFrame(loop); })();
+</script>

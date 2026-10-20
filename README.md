@@ -78,6 +78,10 @@ web/src
   useLive.ts        WebSocket live feed hook
 ```
 
+## Browser-only demo
+
+`demo/broker-demo.html` is a self-contained version that runs the simulator, history, graph, trends and chat entirely in the browser (published as a claude.ai artifact, where the chat uses the viewer's own Claude access). It only shows mock data.
+
 ## Production build
 
 ```bash
