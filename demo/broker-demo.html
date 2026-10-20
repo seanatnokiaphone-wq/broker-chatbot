@@ -327,6 +327,7 @@ class Plant {
     this.oven();
     this.cip();
     this.utilities();
+    ["packaging", "processing", "utilities"].forEach((area, i) => this.network(area, i));
   }
   add(topic, read, unit, every = 2, retain = false, drop) { this.tags.push({ topic: `${ROOT}/${topic}`, read, unit, every, retain, drop }); }
   fault(key) { return this.faults.find((f) => f.until > this.now && key.startsWith(f.key)); }
@@ -579,6 +580,36 @@ class Plant {
     this.add(`${base}/water/total`, () => round(water, 1), "m³", 10);
     this.add(`${base}/water/hardness`, () => round(120 + noise(2), 0), "ppm", 30);
   }
+
+  /**
+   * Per-area network health. Latency normally sits around 2500 ms (0-5000), but about every 10 minutes it drifts
+   * out to ~9000 ms for a few minutes. Most drifts (85%) are preceded by early-warning signs: jitter, packet loss
+   * and retransmits creep up and throughput sags 1-3 minutes before latency moves.
+   */
+  network(area, index) {
+    const base = `${area}/network`;
+    const drift = { onset: this.now + rand(90, 420) * 1000 + index * 120_000, warn: rand(60, 180), ramp: rand(60, 90), hold: rand(60, 150), recover: rand(45, 75), warns: true };
+    const st = { p: 0, d: 0 };
+    const ease = (x) => x * x * (3 - 2 * x);
+    this.updaters.push((now) => {
+      let rel = (now - drift.onset) / 1000;
+      if (rel > drift.ramp + drift.hold + drift.recover) {
+        // Schedule the next drift roughly 10 minutes after this one started.
+        Object.assign(drift, { onset: drift.onset + rand(540, 660) * 1000, warn: rand(60, 180), ramp: rand(60, 90), hold: rand(60, 150), recover: rand(45, 75), warns: Math.random() < 0.85 });
+        rel = (now - drift.onset) / 1000;
+      }
+      st.p = drift.warns && rel >= -drift.warn && rel < 0 ? ease((rel + drift.warn) / drift.warn) : 0;
+      st.d = rel < 0 ? 0 : rel < drift.ramp ? ease(rel / drift.ramp) : rel < drift.ramp + drift.hold ? 1 : rel < drift.ramp + drift.hold + drift.recover ? 1 - ease((rel - drift.ramp - drift.hold) / drift.recover) : 0;
+      if (st.d > 0) st.p = Math.max(st.p, 1 - st.d * 0.3);
+    });
+    const baseLatency = (t) => Math.min(5000, Math.max(50, 2500 + 700 * wave(t, 240, index) + noise(300)));
+    this.add(`${base}/latency_ms`, (t) => Math.round(baseLatency(t) * (1 - st.d) + st.d * (9000 + noise(400))), "ms", 1);
+    this.add(`${base}/jitter_ms`, () => Math.round(Math.max(10, 120 + noise(40) + st.p * 600 + st.d * 900)), "ms", 1);
+    this.add(`${base}/packet_loss_pct`, () => round(Math.max(0, 0.2 + noise(0.1) + st.p * 2.5 + st.d * 4), 2), "%", 2);
+    this.add(`${base}/throughput_mbps`, () => round(Math.max(1, 85 + noise(4) - st.p * 25 - st.d * 45), 1), "Mbps", 2);
+    this.add(`${base}/retransmits_per_min`, () => Math.round(Math.max(0, 4 + noise(2) + st.p * 40 + st.d * 80)), undefined, 5);
+    this.add(`${base}/link_state`, () => (st.d > 0.5 ? "Degraded" : "Up"), undefined, 5, true);
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -682,6 +713,98 @@ const isAlarm = (t) => {
 };
 const fmt = (t, value = lastOf(t).value) => typeof value === "number" ? `${Number.isInteger(value) ? value : value.toFixed(2)}${t.unit ? " " + t.unit : ""}` : String(value);
 
+
+/* ------------------------------------------------------------------ *
+ * Baseline network-drift predictor (same method as server/src/predictor.ts). Every 5 s, per area, it combines
+ * early-warning z-scores (jitter, loss, retransmits, throughput vs their 30-min median/MAD), the latency trend
+ * projected 2 minutes ahead, and the learned drift rhythm into one risk, publishes <area>/network/prediction,
+ * and scores itself against what actually happened.
+ * ------------------------------------------------------------------ */
+const DRIFT_MS = 5000, WARN_RISK = 0.6;
+const predState = new Map();
+const meanOf = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : NaN);
+const medianOf = (xs) => { if (!xs.length) return NaN; const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+const logistic = (x) => 1 / (1 + Math.exp(-x));
+const rn = (v, dp = 0) => (Number.isFinite(v) ? Math.round(v * 10 ** dp) / 10 ** dp : null);
+function robustZ(topic, now, sign = 1) {
+  const t = store.get(topic); if (!t) return 0;
+  const hist = slice(t, now - 30 * 60_000, now).v, recent = slice(t, now - 30_000, now).v;
+  if (hist.length < 20 || !recent.length) return 0;
+  const med = medianOf(hist), mad = medianOf(hist.map((x) => Math.abs(x - med))) * 1.4826 || 1e-6;
+  return (sign * (meanOf(recent) - med)) / mad;
+}
+function predictTick(now) {
+  for (const t of store.values()) {
+    if (!t.topic.endsWith("/network/latency_ms")) continue;
+    const base = t.topic.slice(0, -"/latency_ms".length);
+    let st = predState.get(base);
+    if (!st) predState.set(base, (st = { drifting: false, warnedAt: null, onsets: [], leads: [], missed: 0, falseAlarms: 0 }));
+    const lat = slice(t, now - 60 * 60_000, now);
+    if (lat.v.length < 10) continue;
+    const lat30 = meanOf(slice(t, now - 30_000, now).v);
+
+    // Past onsets in the last hour: the 15 s rolling mean crossing DRIFT_MS upward, at least 3 minutes apart.
+    const onsets = [];
+    let above = false, a = 0, sum = 0;
+    for (let i = 0; i < lat.v.length; i++) {
+      sum += lat.v[i];
+      while (lat.ts[a] < lat.ts[i] - 15_000) sum -= lat.v[a++];
+      const m = sum / (i - a + 1);
+      if (!above && m > DRIFT_MS && (!onsets.length || lat.ts[i] - onsets[onsets.length - 1] > 180_000)) onsets.push(lat.ts[i]);
+      above = m > DRIFT_MS;
+    }
+    const periods = onsets.slice(1).map((o, i) => o - onsets[i]).filter((p) => p > 180_000);
+    const period = periods.length ? medianOf(periods) : null;
+    let dueIn = null;
+    if (period) { let next = onsets[onsets.length - 1] + period; while (next < now - 60_000) next += period; dueIn = (next - now) / 1000; }
+
+    const z = { jitter: robustZ(`${base}/jitter_ms`, now), packet_loss: robustZ(`${base}/packet_loss_pct`, now), retransmits: robustZ(`${base}/retransmits_per_min`, now), throughput_drop: robustZ(`${base}/throughput_mbps`, now, -1) };
+    const zs = Object.values(z).filter((x) => x > 0).sort((x, y) => y - x);
+    const pre = zs.length ? meanOf(zs.slice(0, 3)) : 0;
+    const pPre = logistic((pre - 3) * 1.2);
+
+    let slope = 0;
+    const i90 = lowerBound(lat.ts, now - 90_000), tts = lat.ts.slice(i90), tvs = lat.v.slice(i90);
+    if (tts.length > 5 && tts[tts.length - 1] - tts[0] > 60_000) {
+      const mx = meanOf(tts), my = meanOf(tvs);
+      let num = 0, den = 0;
+      tts.forEach((x, i) => { num += (x - mx) * (tvs[i] - my); den += (x - mx) ** 2; });
+      slope = (num / (den || 1)) * 1000;
+    }
+    const pTrend = logistic((lat30 + slope * 120 - DRIFT_MS) / 600);
+    const pRhythm = dueIn == null || dueIn < -60 ? 0.05 : 0.75 * Math.exp(-Math.max(0, dueIn - 30) / 90);
+
+    const drifting = lat30 > DRIFT_MS;
+    const risk = drifting ? 1 : 1 - (1 - pPre) * (1 - pTrend) * (1 - pRhythm);
+    const baseline = medianOf(lat.v.filter((v) => v < DRIFT_MS));
+    const forecast = drifting ? Math.max(lat30, 8500) : baseline * (1 - risk) + 9000 * risk;
+
+    if (!st.drifting && drifting) {
+      st.onsets.push(now);
+      if (st.warnedAt && now - st.warnedAt < 10 * 60_000) st.leads.push((now - st.warnedAt) / 1000); else st.missed++;
+      st.warnedAt = null;
+    } else if (!drifting && risk >= WARN_RISK && !st.warnedAt) st.warnedAt = now;
+    else if (!drifting && st.warnedAt && now - st.warnedAt > 6 * 60_000) { st.falseAlarms++; st.warnedAt = null; }
+    st.drifting = drifting;
+
+    const reasons = [];
+    if (drifting) reasons.push(`latency ${Math.round(lat30)} ms is above ${DRIFT_MS} ms`);
+    for (const [k, v] of Object.entries(z)) if (v > 2.5) reasons.push(`${k.replace("_", " ")} ${v.toFixed(1)}σ above normal`);
+    if (!drifting && pTrend > 0.4) reasons.push(`latency rising ${Math.round(slope)} ms/s`);
+    if (dueIn != null && dueIn < 180 && dueIn > -60) reasons.push(`drifts recur every ~${Math.round(period / 60_000)} min, next due ${dueIn > 0 ? `in ${Math.round(dueIn)} s` : "now"}`);
+    const doc = {
+      status: drifting ? "Drifting" : risk >= WARN_RISK ? "Drift likely" : risk >= 0.3 ? "Watch" : "Normal",
+      drift_risk_pct: rn(risk * 100, 1), latency_now_ms: rn(lat30), forecast_2m_ms: rn(forecast),
+      next_drift_due_s: dueIn != null ? rn(Math.max(0, dueIn)) : -1, typical_period_min: period ? rn(period / 60_000, 1) : -1,
+      signals: { early_warning_z: rn(pre, 2), latency_slope_ms_per_s: rn(slope, 1), rhythm_pct: rn(pRhythm * 100, 1) },
+      reason: reasons.join("; ") || "all signals normal",
+      score: { drifts_seen: st.onsets.length, predicted: st.leads.length, missed: st.missed, false_alarms: st.falseAlarms, median_lead_s: st.leads.length ? rn(medianOf(st.leads)) : -1, last_lead_s: st.leads.length ? rn(st.leads[st.leads.length - 1]) : -1 },
+      model: "baseline-v1",
+    };
+    emit({ topic: `${base}/prediction`, read: () => doc }, now);
+  }
+}
+
 /* ------------------------------------------------------------------ *
  * Simulation loop: backfill 3 h, then publish live every second.
  * ------------------------------------------------------------------ */
@@ -705,6 +828,7 @@ function publishAt(now, stepS, force) {
     const n = publishAt(now, step, first);
     first = false;
     throughput.push({ ts: now, count: n / step });
+    predictTick(now);
   }
 })();
 let mpsHistory = throughput.slice(-90).map((t) => Math.round(t.count));
@@ -719,6 +843,7 @@ function liveTick() {
     for (const t of emit(tag, now)) pulses.set(t, now);
     n++;
   }
+  if (sec % 5 === 0) predictTick(now);
   throughput.push({ ts: now, count: n });
   mpsHistory.push(n);
   if (mpsHistory.length > 90) mpsHistory.shift();
@@ -834,6 +959,14 @@ function makeTools(onCall) {
       const d = docs.get(String(i.topic));
       if (!d) throw new Error(`Not a JSON document topic. Documents: ${[...docs.keys()].join(", ")}`);
       return { topic: String(i.topic), document: d };
+    }),
+    tool("predict_network_drift", "Current network-drift prediction per area (from the baseline predictor publishing <area>/network/prediction): status, drift risk %, latency now and 2-minute forecast, when the next drift is due, the reasons, and the predictor's own track record (drifts seen, predicted in advance, missed, false alarms, median warning lead time). Use for questions about network latency drift, whether a drift is coming, or how good the prediction is. For the risk over time, use get_history on <area>/network/prediction/drift_risk_pct.", { type: "object", properties: { area: { type: "string", description: "Optional area name, e.g. packaging." } } }, (i) => {
+      const preds = [...docs.keys()].filter((d) => d.endsWith("/network/prediction") && (!i.area || d.includes(`/${i.area}/`)));
+      if (!preds.length) return { note: "No predictions for that area." };
+      return {
+        method: "baseline-v1: early-warning z-scores (jitter, packet loss, retransmits, throughput vs 30-min median/MAD), latency trend projected 2 min, and the learned drift rhythm, combined into one risk. Drift = latency above 5000 ms.",
+        areas: preds.map((d) => ({ topic: d, prediction: docs.get(d) })),
+      };
     }),
     tool("show_chart", "Draw an interactive line chart in the user's chat for 1-6 numeric topics over a window. Use whenever a trend or comparison is clearer as a picture.", { type: "object", properties: { title: { type: "string" }, topics: { type: "array", items: { type: "string" } }, ...winProps }, required: ["title", "topics"] }, (i) => {
       const topics = (Array.isArray(i.topics) ? i.topics : []).map(String).filter((t) => store.get(t)?.numeric).slice(0, 6);
@@ -1459,6 +1592,7 @@ const SUGGESTIONS = [
   "Chart the oven zone temperatures for the last hour",
   "Which motors are running hottest right now?",
   "Have we missed any filler counter messages in the last hour?",
+  "Is a network latency drift coming, and how well has it been predicted?",
 ];
 let turns = [];
 let sample = null, sampleChecked = false, busy = false, ctl = null;
@@ -1467,7 +1601,7 @@ function instructions() {
   const topics = [...store.values()].sort((a, b) => a.topic.localeCompare(b.topic)).map((t) => `${t.topic}${t.unit ? ` [${t.unit}]` : ""}${t.numeric ? "" : " (text)"}`).join("\n");
   return `You are the assistant inside an MQTT broker dashboard. Answer questions about what is happening on the broker now and over the recorded history (up to 180 minutes), using the tools to read real data. Never invent values; if the data doesn't show something, say so.
 
-The broker is a Unified Namespace laid out to ISA-95: enterprise/site/area/line/cell/tag. It is a simulated food and beverage plant (packaging lines, mixers, an oven, CIP and utilities) running in the browser, with faults injected now and then. Some topics carry nested JSON documents (MES work orders per line, mixer batch records, a palletizer robot, boiler diagnostics). Each document is split into field topics at <document topic>/<json path>, e.g. acme/dublin/utilities/boiler/diagnostics/drum/pressure, each with its own history: numeric fields work with get_history and get_stats, text fields with get_state_changes, and get_json_document returns a whole document. The filler counter documents (packaging/<line>/filler/counts) carry a seq number per message and some messages are lost on purpose; use check_sequence_gaps for questions about missed or dropped data.
+The broker is a Unified Namespace laid out to ISA-95: enterprise/site/area/line/cell/tag. It is a simulated food and beverage plant (packaging lines, mixers, an oven, CIP and utilities) running in the browser, with faults injected now and then. Some topics carry nested JSON documents (MES work orders per line, mixer batch records, a palletizer robot, boiler diagnostics). Each document is split into field topics at <document topic>/<json path>, e.g. acme/dublin/utilities/boiler/diagnostics/drum/pressure, each with its own history: numeric fields work with get_history and get_stats, text fields with get_state_changes, and get_json_document returns a whole document. The filler counter documents (packaging/<line>/filler/counts) carry a seq number per message and some messages are lost on purpose; use check_sequence_gaps for questions about missed or dropped data. Each area (packaging, processing, utilities) has network tags under <area>/network/ (latency_ms around 2500 ms that drifts to ~9000 ms about every 10 minutes, plus jitter, packet loss, throughput, retransmits, link_state); a baseline predictor publishes <area>/network/prediction with a drift risk and its own track record. Use predict_network_drift for questions about network drift.
 
 How to work:
 - Prefer get_stats and find_anomalies for broad questions, get_history for one signal, get_state_changes for states, alarms and batch phases. Use exact topic names from the list below.

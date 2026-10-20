@@ -5,7 +5,7 @@ Chat with a live MQTT broker. Ask questions about what's happening right now or 
 - **Recorder** subscribes to the broker (`#` by default) and keeps a rolling history (3 hours by default) in SQLite, plus a live in-memory topic tree.
 - **Chat assistant** uses Claude with tools over that data: overview, list topics, latest values, history, stats, state changes, anomaly scan, and inline charts.
 - **Vite + React UI** with a force-directed topic graph (nodes pulse as messages arrive, alarms turn red), a tree explorer with trend charts over 15 min / 1 h / 3 h, and the chat panel.
-- **Mock UNS generator** publishes 144 ISA-95 shaped tags (`acme/dublin/<area>/<line>/<cell>/<tag>`) across four packaging lines (each with filler, capper, labeler and palletizer), mixers, an oven, CIP and utilities, plus 12 nested JSON documents (including per-filler counters with sequence numbers). Lines run state machines with OEE, and faults are injected every few minutes.
+- **Mock UNS generator** publishes 162 ISA-95 shaped tags (`acme/dublin/<area>/<line>/<cell>/<tag>`) across four packaging lines (each with filler, capper, labeler and palletizer), mixers, an oven, CIP and utilities, plus 12 nested JSON documents (including per-filler counters with sequence numbers), and per-area network health tags whose latency drifts every ~10 minutes, with a baseline predictor that forecasts the drift. Lines run state machines with OEE, and faults are injected every few minutes.
 
 ```
 ┌───────────────┐   MQTT    ┌──────────────────────────── server ─────────────────────────────┐
@@ -94,6 +94,18 @@ Each packaging line's filler publishes `acme/dublin/packaging/<line>/filler/coun
 
 The simulator loses some of these on purpose: about 1% at random, plus a network blip every 8 to 20 minutes that drops everything for 5 to 30 seconds. The counters and `seq` keep counting regardless, so every loss shows up as a jump in `seq`. The recorder finds those jumps. Trend cards for the counts (or their raw JSON) show how many messages were missed with red markers where each gap happened, `/api/gaps?topic=` returns the details, and the chat has a `check_sequence_gaps` tool ("Have we missed any filler counter messages in the last hour?"). A drop back to a lower `seq`, or a jump far too big for the time elapsed, is treated as a publisher restart rather than a loss.
 
+## Network drift prediction
+
+Each area (packaging, processing, utilities) publishes network health under `acme/dublin/<area>/network/`: `latency_ms` and `jitter_ms` every second, `packet_loss_pct` and `throughput_mbps` every 2 s, `retransmits_per_min` and `link_state` every 5 s. Latency normally sits around 2500 ms (0 to 5000), but roughly every 10 minutes it drifts out to about 9000 ms for a few minutes. Most drifts (85%) come with early-warning signs one to three minutes beforehand: jitter, packet loss and retransmits creep up and throughput sags.
+
+`server/src/predictor.ts` (baseline-v1) runs every 5 s per area and combines three signals into a drift risk:
+
+- **Early warning:** robust z-scores of jitter, loss, retransmits and throughput drop (last 30 s against the 30-minute median and MAD).
+- **Trend:** the latency slope over 90 s, projected 2 minutes ahead.
+- **Rhythm:** past drift onsets in the last hour give the typical period, so it knows when the next one is due.
+
+It publishes `acme/dublin/<area>/network/prediction` (status Normal / Watch / Drift likely / Drifting, `drift_risk_pct`, `forecast_2m_ms`, `next_drift_due_s`, the reasons) and scores itself: drifts seen, predicted in advance (risk ≥ 60% within 10 minutes before onset), missed, false alarms and median lead time. Because it is an ordinary JSON document, the risk can be trended next to latency in the cards, and the chat has a `predict_network_drift` tool. Set `PREDICTOR=off` to disable it. In a 70-minute simulated run it flagged all 20 drifts with a median lead of 75 to 125 s and a few false alarms. It is a deliberately simple baseline to compare a trained model against.
+
 ## Things to ask
 
 - "Give me an overview of what's on the broker"
@@ -101,6 +113,7 @@ The simulator loses some of these on purpose: about 1% at random, plus a network
 - "When did packaging line 1 last go down, and for how long?"
 - "Compare OEE for line 1 and line 2 over the last hour and chart it"
 - "Which motors are running hottest right now?"
+- "Is a network latency drift coming, and how well has it been predicted?"
 
 ## Configuration
 
@@ -115,6 +128,7 @@ The simulator loses some of these on purpose: about 1% at random, plus a network
 | `DB_PATH` | `../data/history.db` | SQLite file, relative to `server/` |
 | `INFLUX_URL`, `INFLUX_TOKEN`, `INFLUX_ORG`, `INFLUX_BUCKET` | | Also write every message to InfluxDB 2.x (all four required) |
 | `INFLUX_MEASUREMENT` | `uns` | Influx measurement name |
+| `PREDICTOR` | on | `off` disables the network-drift predictor |
 
 ## Layout
 
@@ -127,7 +141,8 @@ server/src
   tools.ts          Claude tool definitions and handlers
   chat.ts           Streaming tool-use loop
   broker.ts         Embedded aedes broker
-  simulator/        Mock ISA-95 plant (144 tags + 12 JSON documents)
+  simulator/        Mock ISA-95 plant (162 tags + 12 JSON documents)
+  predictor.ts      Baseline network-drift predictor
 web/src
   App.tsx           Layout, status bar, topic detail
   components/       TopicGraph, Explorer, HistoryChart, Chat

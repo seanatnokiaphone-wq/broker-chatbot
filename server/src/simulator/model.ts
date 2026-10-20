@@ -67,6 +67,7 @@ export class Plant {
     this.oven();
     this.cip();
     this.utilities();
+    ["packaging", "processing", "utilities"].forEach((area, i) => this.network(area, i));
   }
 
   private add(topic: string, read: Tag["read"], unit?: string, every = 2, retain = false, drop?: Tag["drop"]) {
@@ -343,6 +344,44 @@ export class Plant {
     this.add(`${base}/supply_temp`, () => round(active() ? 78 + noise(0.8) : 30 + noise(0.3), 1), "°C", 2);
     this.add(`${base}/conductivity`, () => round(active() ? 85 + noise(3) : 0.5 + noise(0.05), 2), "mS/cm", 2);
     this.add(`${base}/flow`, () => round(active() ? 12 + noise(0.4) : 0, 1), "m³/h", 2);
+  }
+
+  /**
+   * Per-area network health. Latency normally sits around 2500 ms (0-5000), but about every 10 minutes it drifts
+   * out to ~9000 ms for a minute or two. In most drifts (85%) jitter, packet loss and retransmits start creeping up
+   * and throughput sags 1-3 minutes beforehand, which is what a predictor can pick up on.
+   */
+  private network(area: string, index: number) {
+    const base = `${area}/network`;
+    const drift = { onset: Date.now() + rand(90, 420) * 1000 + index * 120_000, warn: rand(60, 180), ramp: rand(60, 90), hold: rand(60, 150), recover: rand(45, 75), warns: true };
+    let at = 0;
+    const st = { p: 0, d: 0 };
+    const update = () => {
+      const now = Date.now();
+      if (now - at < 500) return st;
+      at = now;
+      let rel = (now - drift.onset) / 1000;
+      if (rel > drift.ramp + drift.hold + drift.recover) {
+        // Schedule the next drift roughly 10 minutes after this one started.
+        Object.assign(drift, { onset: drift.onset + rand(540, 660) * 1000, warn: rand(60, 180), ramp: rand(60, 90), hold: rand(60, 150), recover: rand(45, 75), warns: Math.random() < 0.85 });
+        rel = (now - drift.onset) / 1000;
+      }
+      const ease = (x: number) => x * x * (3 - 2 * x);
+      st.p = drift.warns && rel >= -drift.warn && rel < 0 ? ease((rel + drift.warn) / drift.warn) : 0;
+      st.d = rel < 0 ? 0 : rel < drift.ramp ? ease(rel / drift.ramp) : rel < drift.ramp + drift.hold ? 1 : rel < drift.ramp + drift.hold + drift.recover ? 1 - ease((rel - drift.ramp - drift.hold) / drift.recover) : 0;
+      if (st.d > 0) st.p = Math.max(st.p, 1 - st.d * 0.3);
+      return st;
+    };
+    const baseLatency = (t: number) => Math.min(5000, Math.max(50, 2500 + 700 * wave(t, 240, index) + noise(300)));
+    this.add(`${base}/latency_ms`, (t) => {
+      const { d } = update();
+      return Math.round(baseLatency(t) * (1 - d) + d * (9000 + noise(400)));
+    }, "ms", 1);
+    this.add(`${base}/jitter_ms`, () => { const { p, d } = update(); return Math.round(Math.max(10, 120 + noise(40) + p * 600 + d * 900)); }, "ms", 1);
+    this.add(`${base}/packet_loss_pct`, () => { const { p, d } = update(); return round(Math.max(0, 0.2 + noise(0.1) + p * 2.5 + d * 4), 2); }, "%", 2);
+    this.add(`${base}/throughput_mbps`, () => { const { p, d } = update(); return round(Math.max(1, 85 + noise(4) - p * 25 - d * 45), 1); }, "Mbps", 2);
+    this.add(`${base}/retransmits_per_min`, () => { const { p, d } = update(); return Math.round(Math.max(0, 4 + noise(2) + p * 40 + d * 80)); }, undefined, 5);
+    this.add(`${base}/link_state`, () => (update().d > 0.5 ? "Degraded" : "Up"), undefined, 5, true);
   }
 
   private utilities() {

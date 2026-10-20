@@ -24,6 +24,7 @@ const SUGGESTIONS = [
   "Chart the oven zone temperatures for the last hour",
   "Which motors are running hottest right now?",
   "Have we missed any filler counter messages in the last hour?",
+  "Is a network latency drift coming, and how well has it been predicted?",
 ];
 
 function newSessionId() {

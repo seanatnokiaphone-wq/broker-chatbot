@@ -8,6 +8,7 @@ import { startEmbeddedBroker } from "./broker.js";
 import { chat, resetSession, type ChatEvent } from "./chat.js";
 import { config } from "./config.js";
 import { startInflux } from "./influx.js";
+import { startPredictor } from "./predictor.js";
 import { startRecorder } from "./recorder.js";
 import { Store, type TopicInfo } from "./store.js";
 
@@ -15,6 +16,8 @@ const embedded = config.mqttUrl ? null : await startEmbeddedBroker(config.embedd
 const store = new Store(config.dbPath, config.retentionMinutes);
 const influx = startInflux();
 const recorder = startRecorder(store, influx);
+// Baseline network-drift predictor; publishes <area>/network/prediction back to the broker.
+if (process.env.PREDICTOR !== "off") startPredictor(store, recorder.client);
 
 const app = express();
 app.use(express.json());

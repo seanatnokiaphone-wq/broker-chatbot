@@ -226,6 +226,27 @@ const definitions = [
   }),
   def({
     tool: {
+      name: "predict_network_drift",
+      description:
+        "Current network-drift prediction for each area (from the baseline predictor publishing <area>/network/prediction): status, drift risk %, latency now and 2-minute forecast, when the next drift is due, the reasons, and the predictor's own track record (drifts seen, predicted in advance, missed, false alarms, median warning lead time). Use for questions about network latency drift, whether a drift is coming, or how good the prediction is. For history of the risk, use get_history on <area>/network/prediction/drift_risk_pct.",
+      input_schema: { type: "object", properties: { area: { type: "string", description: "Optional area name, e.g. packaging." } } },
+    },
+    schema: z.object({ area: z.string().optional() }),
+    run: ({ area }, { store }) => {
+      const preds = store.match("#").filter((t) => t.doc && t.topic.endsWith("/network/prediction") && (!area || t.topic.includes(`/${area}/`)));
+      if (!preds.length) return { note: "No predictions yet. The predictor needs a minute or two of network data, and several drifts before its rhythm signal kicks in." };
+      return {
+        method: "baseline-v1: early-warning z-scores (jitter, packet loss, retransmits, throughput vs 30-min median/MAD), latency trend projected 2 min, and the learned drift rhythm, combined into one risk. Drift = latency above 5000 ms.",
+        areas: preds.map((t) => {
+          let doc: unknown = t.lastPayload;
+          try { doc = JSON.parse(t.lastPayload); } catch {}
+          return { topic: t.topic, updated: iso(t.lastTs), prediction: doc };
+        }),
+      };
+    },
+  }),
+  def({
+    tool: {
       name: "find_anomalies",
       description:
         "Scan numeric topics matching a filter for anomalies over a window: spikes or dips whose z-score exceeds the threshold, sharp recent shifts versus the window average, and topics that have gone quiet (stale). Use for 'is anything wrong?' questions.",
