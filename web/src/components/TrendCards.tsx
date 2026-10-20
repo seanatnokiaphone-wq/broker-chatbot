@@ -2,7 +2,9 @@ import { Braces, Check, Copy, LineChart as ChartIcon, MessageSquare, X } from "l
 import { useState } from "react";
 import { display, isAlarm } from "../api";
 import type { Live } from "../useLive";
+import { useTimeWindow } from "../useTimeWindow";
 import { HistoryChart } from "./HistoryChart";
+import { ZoomControls } from "./ZoomControls";
 import { JsonView } from "./JsonView";
 import { StateTimeline } from "./StateTimeline";
 
@@ -85,10 +87,9 @@ function RawJsonCard({ live, topic, onClose, onAsk }: { live: Live; topic: strin
 }
 
 function TrendCard({ live, topic, onClose, onOpenTrends, onAsk, onOpen }: { live: Live; topic: string; onClose: () => void; onOpenTrends: () => void; onAsk: (text: string) => void; onOpen: (topic: string) => void }) {
-  const [minutes, setMinutes] = useState(15);
+  const win = useTimeWindow(15);
   const row = live.topics.get(topic);
   if (!row) return null;
-  const now = Date.now();
   return (
     <div className="card">
       <div className="card-head">
@@ -101,17 +102,18 @@ function TrendCard({ live, topic, onClose, onOpenTrends, onAsk, onOpen }: { live
         <div className={`card-value ${isAlarm(row) ? "bad" : ""}`}>{display(row)}</div>
         <div className="segmented mini">
           {RANGES.map((r) => (
-            <button key={r.minutes} className={minutes === r.minutes ? "on" : ""} onClick={() => setMinutes(r.minutes)}>
+            <button key={r.minutes} className={!win.zoomed && win.minutes === r.minutes ? "on" : ""} onClick={() => win.setMinutes(r.minutes)}>
               {r.label}
             </button>
           ))}
         </div>
       </div>
       {row.value != null ? (
-        <HistoryChart topics={[topic]} from={now - minutes * 60_000} to={now} units={{ [topic]: row.unit }} live height={110} />
+        <HistoryChart topics={[topic]} from={win.from} to={win.to} units={{ [topic]: row.unit }} live={win.live} height={110} onZoom={win.zoomTo} />
       ) : (
-        <StateTimeline topics={[topic]} from={now - minutes * 60_000} to={now} live />
+        <StateTimeline topics={[topic]} from={win.from} to={win.to} live={win.live} />
       )}
+      <ZoomControls win={win} compact />
       <div className="card-foot">
         <span className="small muted">
           {row.rate.toFixed(0)} msg/min{row.source ? " · JSON field" : ""}

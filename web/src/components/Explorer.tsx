@@ -3,7 +3,9 @@ import { useMemo, useState } from "react";
 import { display, isAlarm, type TopicRow } from "../api";
 import { SERIES } from "../colors";
 import type { Live } from "../useLive";
+import { useTimeWindow } from "../useTimeWindow";
 import { HistoryChart } from "./HistoryChart";
+import { ZoomControls } from "./ZoomControls";
 import { StateTimeline } from "./StateTimeline";
 
 interface TreeNode {
@@ -28,7 +30,7 @@ interface Props {
 /** Topic tree with live values; picked topics are charted over the chosen window. */
 export function Explorer({ live, chartTopics, onToggle }: Props) {
   const [filter, setFilter] = useState("");
-  const [minutes, setMinutes] = useState(60);
+  const win = useTimeWindow(60);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   const tree = useMemo(() => {
@@ -51,7 +53,6 @@ export function Explorer({ live, chartTopics, onToggle }: Props) {
   const numeric = chartTopics.filter((t) => live.topics.get(t)?.value != null);
   const text = chartTopics.filter((t) => !numeric.includes(t));
   const units = Object.fromEntries(numeric.map((t) => [t, live.topics.get(t)?.unit]));
-  const now = Date.now();
 
   const toggleCollapse = (path: string) =>
     setCollapsed((s) => {
@@ -96,18 +97,22 @@ export function Explorer({ live, chartTopics, onToggle }: Props) {
       <div className="explorer-chart">
         <div className="toolbar">
           <span className="muted small">{chartTopics.length ? `${chartTopics.length} of 6 topics` : "Click topics to chart them (text topics show as state timelines)"}</span>
-          <div className="segmented">
-            {RANGES.map((r) => (
-              <button key={r.minutes} className={minutes === r.minutes ? "on" : ""} onClick={() => setMinutes(r.minutes)}>
-                {r.label}
-              </button>
-            ))}
+          <div className="toolbar-right">
+            <ZoomControls win={win} />
+            <div className="segmented">
+              {RANGES.map((r) => (
+                <button key={r.minutes} className={!win.zoomed && win.minutes === r.minutes ? "on" : ""} onClick={() => win.setMinutes(r.minutes)}>
+                  {r.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
         {chartTopics.length ? (
           <>
-            {numeric.length > 0 && <HistoryChart topics={numeric} from={now - minutes * 60_000} to={now} units={units} live height={text.length ? 300 : 420} />}
-            {text.length > 0 && <StateTimeline topics={text} from={now - minutes * 60_000} to={now} live />}
+            {numeric.length > 0 && <HistoryChart topics={numeric} from={win.from} to={win.to} units={units} live={win.live} height={text.length ? 300 : 420} onZoom={win.zoomTo} />}
+            {text.length > 0 && <StateTimeline topics={text} from={win.from} to={win.to} live={win.live} />}
+            <div className="small muted zoom-hint">Drag across a chart to zoom into that range.</div>
           </>
         ) : (
           <div className="empty">Pick topics from the tree to compare their history.</div>

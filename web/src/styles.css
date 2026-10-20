@@ -136,6 +136,17 @@ button.icon:hover { color: var(--ink); background: var(--surface-2); }
 .segmented button { background: none; border: none; padding: 5px 12px; color: var(--muted); font-size: 12px; }
 .segmented button.on { background: var(--surface-2); color: var(--ink); }
 .empty { color: var(--muted); padding: 60px 0; text-align: center; }
+.toolbar-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.zoom-controls { display: flex; align-items: center; gap: 2px; border: 1px solid var(--line-2); border-radius: 8px; padding: 2px; }
+.zoom-controls button { display: flex; align-items: center; gap: 4px; background: none; border: none; color: var(--ink-2); border-radius: 6px; padding: 3px 6px; font-size: 12px; }
+.zoom-controls button:hover:not(:disabled) { background: var(--surface-2); color: var(--ink); }
+.zoom-controls button:disabled { opacity: 0.35; cursor: default; }
+.zoom-controls .reset.on { color: var(--accent); }
+.zoom-controls .zoom-range { padding: 0 6px; }
+.zoom-controls.compact { align-self: flex-start; border: none; padding: 0; }
+.zoom-controls.compact button { padding: 2px 5px; }
+.zoom-hint { margin-top: 6px; }
+.recharts-wrapper:focus, .recharts-surface:focus, .recharts-wrapper *:focus { outline: none; }
 .chart-panel { margin-bottom: 8px; }
 .chart-unit { font-size: 11px; color: var(--muted); margin-left: 44px; }
 
