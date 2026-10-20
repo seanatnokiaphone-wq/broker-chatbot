@@ -195,6 +195,37 @@ const definitions = [
   }),
   def({
     tool: {
+      name: "check_sequence_gaps",
+      description:
+        "Find missed (dropped) messages using sequence numbers. Works on topics carrying a seq field, e.g. the filler counters at acme/dublin/packaging/+/filler/counts. Returns per topic how many messages were received vs missed, the loss %, and when each gap happened. Use for data quality, 'did we lose any data' or 'can I trust these counts' questions.",
+      input_schema: {
+        type: "object",
+        properties: { filter: { type: "string", description: "Topic or MQTT filter (default: every topic with a sequence number)." }, ...windowProps, max_gaps: { type: "number", description: "Gaps to list per topic, most recent first (default 10)." } },
+      },
+    },
+    schema: z.object({ filter: z.string().default("#"), ...Window, max_gaps: z.number().int().positive().max(100).default(10) }),
+    run: ({ filter, max_gaps, ...w }, { store }) => {
+      const { from, to } = resolveWindow(w);
+      const seen = new Set<string>();
+      const results = [];
+      for (const t of store.match(filter)) {
+        const seqTopic = store.seqTopic(t.topic);
+        if (!seqTopic || seen.has(seqTopic)) continue;
+        seen.add(seqTopic);
+        const g = store.sequenceGaps(seqTopic, from, to)!;
+        results.push({
+          topic: seqTopic.replace(/\/[^/]+$/, ""), seqTopic, received: g.received, missed: g.missed, lossPct: r(g.lossPct, 2), restarts: g.restarts, gapCount: g.gaps.length,
+          longestGap: g.gaps.length ? (() => { const x = g.gaps.reduce((a, b) => (b.missed > a.missed ? b : a)); return { at: iso(x.at), missed: x.missed, seconds: r((x.at - x.lastSeenAt) / 1000, 1) }; })() : null,
+          recentGaps: g.gaps.slice(-max_gaps).reverse().map((x) => ({ at: iso(x.at), lastSeenAt: iso(x.lastSeenAt), afterSeq: x.afterSeq, nextSeq: x.nextSeq, missed: x.missed })),
+        });
+      }
+      if (!results.length) return { from: iso(from), to: iso(to), note: "No topics with a sequence number match that filter." };
+      results.sort((a, b) => b.missed - a.missed);
+      return { from: iso(from), to: iso(to), topics: results };
+    },
+  }),
+  def({
+    tool: {
       name: "find_anomalies",
       description:
         "Scan numeric topics matching a filter for anomalies over a window: spikes or dips whose z-score exceeds the threshold, sharp recent shifts versus the window average, and topics that have gone quiet (stale). Use for 'is anything wrong?' questions.",

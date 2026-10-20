@@ -5,7 +5,7 @@ Chat with a live MQTT broker. Ask questions about what's happening right now or 
 - **Recorder** subscribes to the broker (`#` by default) and keeps a rolling history (3 hours by default) in SQLite, plus a live in-memory topic tree.
 - **Chat assistant** uses Claude with tools over that data: overview, list topics, latest values, history, stats, state changes, anomaly scan, and inline charts.
 - **Vite + React UI** with a force-directed topic graph (nodes pulse as messages arrive, alarms turn red), a tree explorer with trend charts over 15 min / 1 h / 3 h, and the chat panel.
-- **Mock UNS generator** publishes 144 ISA-95 shaped tags (`acme/dublin/<area>/<line>/<cell>/<tag>`) across four packaging lines (each with filler, capper, labeler and palletizer), mixers, an oven, CIP and utilities, plus 8 nested JSON documents. Lines run state machines with OEE, and faults are injected every few minutes.
+- **Mock UNS generator** publishes 144 ISA-95 shaped tags (`acme/dublin/<area>/<line>/<cell>/<tag>`) across four packaging lines (each with filler, capper, labeler and palletizer), mixers, an oven, CIP and utilities, plus 12 nested JSON documents (including per-filler counters with sequence numbers). Lines run state machines with OEE, and faults are injected every few minutes.
 
 ```
 ┌───────────────┐   MQTT    ┌──────────────────────────── server ─────────────────────────────┐
@@ -84,6 +84,16 @@ acme/dublin/utilities/boiler/diagnostics   {"health": {"status": "OK", "score": 
 
 Each field gets its own history, so it can be trended, searched, shown in the graph and tree (document branches are marked JSON), and queried in chat. Text fields chart as state timelines. `get_latest` on the document topic returns the whole document. The simulator publishes eight examples: an MES work order per packaging line, a batch record per mixer, a palletizer robot snapshot and boiler diagnostics.
 
+## Sequence numbers and missed data
+
+Each packaging line's filler publishes `acme/dublin/packaging/<line>/filler/counts` once a second:
+
+```json
+{"seq": 18234, "good_count": 40330, "reject_count": 162, "total_count": 40492, "state": "Filling", "timestamp": "…"}
+```
+
+The simulator loses some of these on purpose: about 1% at random, plus a network blip every 8 to 20 minutes that drops everything for 5 to 30 seconds. The counters and `seq` keep counting regardless, so every loss shows up as a jump in `seq`. The recorder finds those jumps. Trend cards for the counts (or their raw JSON) show how many messages were missed with red markers where each gap happened, `/api/gaps?topic=` returns the details, and the chat has a `check_sequence_gaps` tool ("Have we missed any filler counter messages in the last hour?"). A drop back to a lower `seq`, or a jump far too big for the time elapsed, is treated as a publisher restart rather than a loss.
+
 ## Things to ask
 
 - "Give me an overview of what's on the broker"
@@ -117,7 +127,7 @@ server/src
   tools.ts          Claude tool definitions and handlers
   chat.ts           Streaming tool-use loop
   broker.ts         Embedded aedes broker
-  simulator/        Mock ISA-95 plant (144 tags + 8 JSON documents)
+  simulator/        Mock ISA-95 plant (144 tags + 12 JSON documents)
 web/src
   App.tsx           Layout, status bar, topic detail
   components/       TopicGraph, Explorer, HistoryChart, Chat

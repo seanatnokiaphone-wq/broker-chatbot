@@ -57,6 +57,13 @@ app.get("/api/history", (req, res) => {
   res.json(Object.fromEntries(topics.map((t) => [t, store.history(t, from, to, points)])));
 });
 
+// Missed messages from sequence-number jumps.
+app.get("/api/gaps", (req, res) => {
+  const to = Number(req.query.to) || Date.now();
+  const from = Number(req.query.from) || to - 60 * 60_000;
+  res.json(store.sequenceGaps(String(req.query.topic ?? ""), from, to));
+});
+
 // State changes for text topics, for the state timeline chart.
 app.get("/api/changes", (req, res) => {
   const topics = ([] as string[]).concat((req.query.topic as string | string[]) ?? []);

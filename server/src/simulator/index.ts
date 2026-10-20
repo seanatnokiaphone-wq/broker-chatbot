@@ -28,6 +28,7 @@ client.on("connect", () => {
     for (const tag of plant.tags) {
       if (!first && t % tag.every !== 0) continue;
       const value = tag.read(t);
+      if (tag.drop?.()) continue; // simulated lost message
       const timestamp = new Date(now).toISOString();
       const payload = JSON.stringify(typeof value === "object" ? { ...value, timestamp } : { value, unit: tag.unit, quality: "GOOD", timestamp });
       // Retained state tags go at QoS 1: they matter more, and aedes drops QoS 0 retained publishes to live subscribers.

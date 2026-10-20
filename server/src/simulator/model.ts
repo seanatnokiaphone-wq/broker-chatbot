@@ -12,6 +12,8 @@ export interface Tag {
   /** Publish period in seconds. */
   every: number;
   retain?: boolean;
+  /** Return true to simulate this message getting lost (read() still runs, so sequence numbers move on). */
+  drop?: () => boolean;
   /** A number or string is wrapped as {value, unit, quality, timestamp}; an object is published as a nested JSON document. */
   read: (t: number) => number | string | JsonDoc;
 }
@@ -67,8 +69,8 @@ export class Plant {
     this.utilities();
   }
 
-  private add(topic: string, read: Tag["read"], unit?: string, every = 2, retain = false) {
-    this.tags.push({ topic: `${root}/${topic}`, unit, every, retain, read });
+  private add(topic: string, read: Tag["read"], unit?: string, every = 2, retain = false, drop?: Tag["drop"]) {
+    this.tags.push({ topic: `${root}/${topic}`, unit, every, retain, read, drop });
   }
 
   fault(key: string) {
@@ -180,6 +182,34 @@ export class Plant {
     this.add(`${base}/filler/nozzle_pressure`, s((t) => round(2.4 + 0.1 * wave(t, 120) + noise(0.03), 2)), "bar", 2);
     this.add(`${base}/filler/motor_temp`, motorTemp("filler", 55), "°C", 2);
     this.add(`${base}/filler/motor_current`, s(() => round(12 * runningFactor() + noise(0.4), 1)), "A", 2);
+
+    // Filler counters with a per-message sequence number. Some messages are lost on purpose: about 1% at random,
+    // plus a network blip every 8-20 minutes that drops everything for 5-30 s. The counters keep counting and the
+    // sequence number keeps incrementing, so the gaps show up as jumps in seq.
+    let seq = 0; // restarts from 1 each time the simulator starts, like a real publisher
+    let filled = good + reject + rand(500, 2000);
+    let fillRejects = filled * 0.004;
+    let lastFillT = 0;
+    let blipFrom = Date.now() + rand(120, 600) * 1000;
+    let blipUntil = 0;
+    const lost = () => {
+      const now = Date.now();
+      if (now >= blipFrom) {
+        blipUntil = now + rand(5, 30) * 1000;
+        blipFrom = blipUntil + rand(480, 1200) * 1000;
+      }
+      return now < blipUntil || Math.random() < 0.01;
+    };
+    this.add(`${base}/filler/counts`, s((t) => {
+      const dt = lastFillT ? t - lastFillT : 0;
+      lastFillT = t;
+      const made = (speed.v / 60) * dt;
+      const rr = this.fault(`${base}/filler/motor_temp`) ? 0.02 : 0.004;
+      filled += made;
+      fillRejects += made * rr;
+      const total = Math.round(filled), rejects = Math.round(fillRejects);
+      return { seq: ++seq, good_count: total - rejects, reject_count: rejects, total_count: total, state: state === "Running" ? "Filling" : "Stopped" };
+    }), undefined, 1, false, lost);
 
     this.add(`${base}/capper/torque`, s((t) => round((this.fault(`${base}/capper/torque`) ? 1.6 + 0.4 * wave(t, 60) : 2.2) + noise(0.05), 2)), "Nm", 2);
     this.add(`${base}/capper/motor_temp`, motorTemp("capper", 48), "°C", 2);

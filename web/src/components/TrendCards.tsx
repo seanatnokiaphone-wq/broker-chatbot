@@ -1,6 +1,7 @@
 import { Braces, Check, Copy, LineChart as ChartIcon, MessageSquare, X } from "lucide-react";
 import { useState } from "react";
-import { display, isAlarm } from "../api";
+import { display, isAlarm, seqSource, type Gaps } from "../api";
+import { useGaps } from "../useGaps";
 import type { Live } from "../useLive";
 import { useTimeWindow } from "../useTimeWindow";
 import { HistoryChart } from "./HistoryChart";
@@ -55,6 +56,8 @@ export function TrendCards({ live, topics, onClose, onClear, onOpenTrends, onAsk
 /** The whole latest message of a JSON document topic, updated live. */
 function RawJsonCard({ live, topic, onClose, onAsk }: { live: Live; topic: string; onClose: () => void; onAsk: (text: string) => void }) {
   const [copied, setCopied] = useState(false);
+  const now = Date.now();
+  const gaps = useGaps(seqSource(live.topics, topic), now - 15 * 60_000, now, true);
   const row = live.topics.get(topic);
   if (!row) return null;
   const fields = [...live.topics.values()].filter((r) => r.source === topic).length;
@@ -71,6 +74,7 @@ function RawJsonCard({ live, topic, onClose, onAsk }: { live: Live; topic: strin
         <Braces size={12} style={{ verticalAlign: "-2px" }} /> Raw JSON · {fields} fields · updated {Math.max(0, Math.round((Date.now() - row.lastTs) / 1000))} s ago
       </div>
       <JsonView text={row.payload} />
+      {gaps && <GapSummary gaps={gaps} label="last 15 min" />}
       <div className="card-foot">
         <span className="small muted">{row.rate.toFixed(0)} msg/min</span>
         <span className="card-actions">
@@ -86,8 +90,24 @@ function RawJsonCard({ live, topic, onClose, onAsk }: { live: Live; topic: strin
   );
 }
 
+/** Missed-message summary from sequence-number jumps; red lines on the chart mark each gap. */
+function GapSummary({ gaps, label }: { gaps: Gaps; label?: string }) {
+  if (!gaps.received) return null;
+  const biggest = gaps.gaps.reduce<Gaps["gaps"][number] | null>((a, g) => (!a || g.missed > a.missed ? g : a), null);
+  return gaps.missed ? (
+    <div className="gap-summary bad small" title={gaps.gaps.slice(-8).map((g) => `${new Date(g.at).toLocaleTimeString()}: seq ${g.afterSeq} → ${g.nextSeq} (${g.missed} missed)`).join("\n")}>
+      ⚠ {gaps.missed} missed of {gaps.missed + gaps.received} ({gaps.lossPct.toFixed(1)}%) · {gaps.gaps.length} gap{gaps.gaps.length === 1 ? "" : "s"}
+      {biggest && biggest.missed > 1 ? ` · longest ${Math.round((biggest.at - biggest.lastSeenAt) / 1000)} s` : ""}
+      {label ? ` · ${label}` : ""}
+    </div>
+  ) : (
+    <div className="gap-summary small">✓ No missed messages{label ? ` · ${label}` : ""}</div>
+  );
+}
+
 function TrendCard({ live, topic, onClose, onOpenTrends, onAsk, onOpen }: { live: Live; topic: string; onClose: () => void; onOpenTrends: () => void; onAsk: (text: string) => void; onOpen: (topic: string) => void }) {
   const win = useTimeWindow(15);
+  const gaps = useGaps(seqSource(live.topics, topic), win.from, win.to, win.live);
   const row = live.topics.get(topic);
   if (!row) return null;
   return (
@@ -109,10 +129,11 @@ function TrendCard({ live, topic, onClose, onOpenTrends, onAsk, onOpen }: { live
         </div>
       </div>
       {row.value != null ? (
-        <HistoryChart topics={[topic]} from={win.from} to={win.to} units={{ [topic]: row.unit }} live={win.live} height={110} onZoom={win.zoomTo} />
+        <HistoryChart topics={[topic]} from={win.from} to={win.to} units={{ [topic]: row.unit }} live={win.live} height={110} onZoom={win.zoomTo} markers={gaps?.gaps.map((g) => g.at)} />
       ) : (
         <StateTimeline topics={[topic]} from={win.from} to={win.to} live={win.live} />
       )}
+      {gaps && <GapSummary gaps={gaps} />}
       <ZoomControls win={win} compact />
       <div className="card-foot">
         <span className="small muted">

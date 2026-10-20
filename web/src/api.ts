@@ -68,6 +68,30 @@ export async function getChanges(topics: string[], from: number, to: number): Pr
   return (await fetch(`/api/changes?${q}`)).json();
 }
 
+export interface Gaps {
+  topic: string;
+  received: number;
+  missed: number;
+  lossPct: number;
+  gaps: { at: number; lastSeenAt: number; afterSeq: number; nextSeq: number; missed: number }[];
+}
+
+export async function getGaps(topic: string, from: number, to: number): Promise<Gaps | null> {
+  const q = new URLSearchParams({ topic, from: String(from), to: String(to) });
+  return (await fetch(`/api/gaps?${q}`)).json();
+}
+
+const SEQ_NAME = /^(seq|sequence|seq_no|seqNo|sequence_number)$/;
+/** The topic whose sequence number covers this one: the seq field itself, or the document a field (or document) belongs to. */
+export function seqSource(topics: Map<string, TopicRow>, topic: string): string | null {
+  const row = topics.get(topic);
+  const doc = row?.doc ? topic : row?.source;
+  if (SEQ_NAME.test(topic.split("/").at(-1) ?? "")) return topic;
+  if (!doc) return null;
+  for (const t of topics.keys()) if (t.startsWith(doc + "/") && SEQ_NAME.test(t.slice(doc.length + 1))) return t;
+  return null;
+}
+
 /** Streams the assistant's reply as server-sent events. */
 export async function sendChat(sessionId: string, message: string, onEvent: (e: ChatEvent) => void, signal?: AbortSignal) {
   const res = await fetch("/api/chat", {

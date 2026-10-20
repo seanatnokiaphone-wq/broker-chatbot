@@ -23,6 +23,7 @@ const SUGGESTIONS = [
   "When did packaging line 1 last go down, and for how long?",
   "Chart the oven zone temperatures for the last hour",
   "Which motors are running hottest right now?",
+  "Have we missed any filler counter messages in the last hour?",
 ];
 
 function newSessionId() {

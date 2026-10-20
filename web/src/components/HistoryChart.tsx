@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CartesianGrid, Legend, Line, LineChart, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { CartesianGrid, Legend, Line, LineChart, ReferenceArea, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { getHistory, type HistoryPoint } from "../api";
 import { SERIES } from "../colors";
 
@@ -13,6 +13,8 @@ interface Props {
   height?: number;
   /** Enables drag-to-zoom: called with the selected time range. */
   onZoom?: (from: number, to: number) => void;
+  /** Times to mark with a red line, e.g. where messages were missed. */
+  markers?: number[];
 }
 
 const short = (t: string) => t.split("/").slice(-3).join("/");
@@ -20,7 +22,7 @@ const timeFmt = (span: number) => (ts: number) =>
   new Date(ts).toLocaleTimeString([], span < 15 * 60_000 ? { hour: "2-digit", minute: "2-digit", second: "2-digit" } : { hour: "2-digit", minute: "2-digit" });
 
 /** Line chart of recorded history. Topics with different units get their own panel, so there is never a second y-axis. */
-export function HistoryChart({ topics, from, to, units = {}, live = false, height = 220, onZoom }: Props) {
+export function HistoryChart({ topics, from, to, units = {}, live = false, height = 220, onZoom, markers = [] }: Props) {
   const [data, setData] = useState<Record<string, HistoryPoint[]>>({});
   const [win, setWin] = useState({ from, to });
   const [drag, setDrag] = useState<{ a: number; b: number } | null>(null);
@@ -100,6 +102,9 @@ export function HistoryChart({ topics, from, to, units = {}, live = false, heigh
                   formatter={(v, name) => [`${Number(v).toFixed(2)}${unit ? ` ${unit}` : ""}`, short(String(name))]}
                 />
                 {ts.length > 1 && <Legend formatter={(v) => <span style={{ color: "#c3c2b7", fontSize: 11 }}>{short(String(v))}</span>} />}
+                {markers.map((m) => (
+                  <ReferenceLine key={m} x={m} stroke="#d03b3b" strokeDasharray="3 3" strokeOpacity={0.8} ifOverflow="hidden" />
+                ))}
                 {drag && drag.a !== drag.b && <ReferenceArea x1={drag.a} x2={drag.b} fill="#3987e5" fillOpacity={0.15} stroke="#3987e5" strokeOpacity={0.5} />}
                 {ts.map((t) => (
                   <Line key={t} dataKey={t} stroke={SERIES[topics.indexOf(t) % SERIES.length]} strokeWidth={2} dot={false} isAnimationActive={false} connectNulls />

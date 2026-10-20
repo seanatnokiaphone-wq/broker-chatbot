@@ -64,6 +64,8 @@ function stateKey(raw: string): string {
 const VALUE_KEYS = ["value", "Value", "v", "val"];
 const SKIP_KEYS = new Set(["timestamp", "ts", "time", "Timestamp"]);
 const MAX_FIELDS = 64;
+/** Field or topic names treated as message sequence numbers. */
+export const SEQ_NAME = /^(seq|sequence|seq_no|seqNo|sequence_number)$/;
 
 /**
  * Splits a nested JSON document into one entry per leaf, keyed by its path ("drum/pressure", "axes/0/temp").
@@ -276,6 +278,38 @@ export class Store {
       prev = key;
     }
     return out.slice(-limit);
+  }
+
+  /** The sequence-number topic for a topic: itself if it is one, or its seq field if it's a JSON document. */
+  seqTopic(topic: string): string | null {
+    if (SEQ_NAME.test(topic.split("/").at(-1) ?? "")) return this.topics.has(topic) ? topic : null;
+    for (const name of ["seq", "sequence", "seq_no", "sequence_number", "seqNo"]) if (this.topics.has(`${topic}/${name}`)) return `${topic}/${name}`;
+    return null;
+  }
+
+  /**
+   * Missed messages, found from jumps in a sequence number. A jump of n means n - 1 messages never arrived.
+   * A drop back to a lower number, or a jump far bigger than the time gap could explain at the usual message
+   * rate, is counted as a publisher restart rather than a loss.
+   */
+  sequenceGaps(topic: string, from: number, to: number) {
+    const seqTopic = this.seqTopic(topic);
+    if (!seqTopic) return null;
+    const rows = this.values(seqTopic, from, to);
+    const gaps: { at: number; lastSeenAt: number; afterSeq: number; nextSeq: number; missed: number }[] = [];
+    let restarts = 0;
+    const dts = rows.slice(1).map((r, i) => r.ts - rows[i].ts).sort((a, b) => a - b);
+    const typical = Math.max(1, dts[Math.floor(dts.length / 2)] ?? 1000);
+    for (let i = 1; i < rows.length; i++) {
+      const d = rows[i].value - rows[i - 1].value;
+      const plausible = Math.round((rows[i].ts - rows[i - 1].ts) / typical) * 3 + 10;
+      if (d - 1 > plausible) restarts++;
+      else if (d > 1) gaps.push({ at: rows[i].ts, lastSeenAt: rows[i - 1].ts, afterSeq: rows[i - 1].value, nextSeq: rows[i].value, missed: d - 1 });
+      else if (d < 0) restarts++;
+    }
+    const missed = gaps.reduce((a, g) => a + g.missed, 0);
+    const received = rows.length;
+    return { topic: seqTopic, from, to, received, missed, expected: received + missed, lossPct: received + missed ? (missed / (received + missed)) * 100 : 0, restarts, gaps };
   }
 
   /** Values in a window, for anomaly checks. */

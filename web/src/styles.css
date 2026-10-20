@@ -146,6 +146,8 @@ button.icon:hover { color: var(--ink); background: var(--surface-2); }
 .zoom-controls.compact { align-self: flex-start; border: none; padding: 0; }
 .zoom-controls.compact button { padding: 2px 5px; }
 .zoom-hint { margin-top: 6px; }
+.gap-summary { color: var(--good); }
+.gap-summary.bad { color: #e66767; }
 .recharts-wrapper:focus, .recharts-surface:focus, .recharts-wrapper *:focus { outline: none; }
 .chart-panel { margin-bottom: 8px; }
 .chart-unit { font-size: 11px; color: var(--muted); margin-left: 44px; }

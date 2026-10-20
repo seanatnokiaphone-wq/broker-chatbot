@@ -89,6 +89,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .zoom-controls .reset.on { color: var(--accent); }
 .zoom-controls .zoom-range { padding: 0 6px; }
 .zoom-controls.compact { align-self: flex-start; border: none; padding: 0; }
+.gap-summary { color: var(--good); } .gap-summary.bad { color: #e66767; }
 .json-view { margin: 4px 0; padding: 8px 10px; background: var(--page); border: 1px solid var(--line); border-radius: 8px; font-family: "IBM Plex Mono", monospace; font-size: 11.5px; line-height: 1.45; color: var(--ink-2); max-height: 340px; overflow: auto; white-space: pre; }
 .json-view .j-key { color: #9ec5f4; } .json-view .j-str { color: #8fd3b6; } .json-view .j-num { color: #f0c674; } .json-view .j-lit { color: #e598b8; }
 @media (max-width: 900px) { #view-graph:not([hidden]) { flex-direction: column; } .cards { width: auto; max-height: 45%; border-left: none; border-top: 1px solid var(--line); } }
@@ -327,7 +328,7 @@ class Plant {
     this.cip();
     this.utilities();
   }
-  add(topic, read, unit, every = 2, retain = false) { this.tags.push({ topic: `${ROOT}/${topic}`, read, unit, every, retain }); }
+  add(topic, read, unit, every = 2, retain = false, drop) { this.tags.push({ topic: `${ROOT}/${topic}`, read, unit, every, retain, drop }); }
   fault(key) { return this.faults.find((f) => f.until > this.now && key.startsWith(f.key)); }
   inject(name, key, seconds = rand(150, 300)) {
     this.faults.push({ name, key, from: this.now, until: this.now + seconds * 1000 });
@@ -399,6 +400,24 @@ class Plant {
     this.add(`${base}/filler/nozzle_pressure`, (n) => round(2.4 + 0.1 * wave(n, 120) + noise(0.03), 2), "bar", 2);
     this.add(`${base}/filler/motor_temp`, mt("filler"), "°C", 2);
     this.add(`${base}/filler/motor_current`, () => round(12 * (run() ? 1 : 0.2) + noise(0.4), 1), "A", 2);
+    // Filler counters with a per-message sequence number. Some messages are lost on purpose: about 1% at random,
+    // plus a network blip every 8-20 minutes that drops everything for 5-30 s. Counters and seq keep counting,
+    // so the losses show up as jumps in seq.
+    const fc = { seq: Math.floor(rand(10_000, 90_000)), filled: s.good + s.reject + rand(500, 2000), rejects: 0, last: 0, blipFrom: this.now + rand(120, 900) * 1000, blipUntil: 0 };
+    fc.rejects = fc.filled * 0.004;
+    const lost = () => {
+      if (this.now >= fc.blipFrom) { fc.blipUntil = this.now + rand(5, 30) * 1000; fc.blipFrom = fc.blipUntil + rand(480, 1200) * 1000; }
+      return this.now < fc.blipUntil || Math.random() < 0.01;
+    };
+    this.add(`${base}/filler/counts`, (n) => {
+      const dt = fc.last ? (n - fc.last) / 1000 : 0;
+      fc.last = n;
+      const made = (speed.v / 60) * dt;
+      fc.filled += made;
+      fc.rejects += made * (this.fault(`${base}/filler/motor_temp`) ? 0.02 : 0.004);
+      const total = Math.round(fc.filled), rejects = Math.round(fc.rejects);
+      return { seq: ++fc.seq, good_count: total - rejects, reject_count: rejects, total_count: total, state: run() ? "Filling" : "Stopped" };
+    }, undefined, 1, false, lost);
     this.add(`${base}/capper/torque`, (n) => round((this.fault(`${base}/capper/torque`) ? 1.6 + 0.4 * wave(n, 60) : 2.2) + noise(0.05), 2), "Nm", 2);
     this.add(`${base}/capper/motor_temp`, mt("capper"), "°C", 2);
     this.add(`${base}/capper/cap_hopper_level`, (n) => round(60 + 35 * wave(n, 1500, phase) + noise(1), 0), "%", 5);
@@ -590,10 +609,40 @@ function flatten(o, path = [], out = []) {
 /** Publishes one tag: a plain value, or a JSON document that is split into field topics. Returns the topics written. */
 function emit(tag, now) {
   const v = tag.read(now);
+  if (tag.drop?.()) return []; // simulated lost message
   if (!v || typeof v !== "object") { record(tag.topic, tag.unit, now, v); return [tag.topic]; }
   docs.set(tag.topic, { ...v, timestamp: new Date(now).toISOString() });
   totalMsgs++;
   return flatten(v).map(([path, value, unit]) => (record(`${tag.topic}/${path}`, unit, now, value, tag.topic), `${tag.topic}/${path}`));
+}
+const SEQ_NAME = /^(seq|sequence|seq_no|seqNo|sequence_number)$/;
+/** The seq topic covering a topic: itself, or the seq field of the JSON document it is (or belongs to). */
+function seqSource(topic) {
+  if (SEQ_NAME.test(topic.split("/").pop())) return store.has(topic) ? topic : null;
+  const doc = docs.has(topic) ? topic : store.get(topic)?.source;
+  if (!doc) return null;
+  return ["seq", "sequence", "seq_no", "seqNo", "sequence_number"].map((n) => `${doc}/${n}`).find((t) => store.has(t)) || null;
+}
+/** Missed messages from jumps in a sequence number (a jump of n = n - 1 lost; a drop back = restart). */
+function seqGaps(seqTopic, from, to) {
+  const s = slice(store.get(seqTopic), from, to), gaps = [];
+  let restarts = 0;
+  const dts = s.ts.slice(1).map((t, i) => t - s.ts[i]).sort((a, b) => a - b), typical = Math.max(1, dts[Math.floor(dts.length / 2)] ?? 1000);
+  for (let i = 1; i < s.v.length; i++) {
+    const d = s.v[i] - s.v[i - 1];
+    if (d - 1 > Math.round((s.ts[i] - s.ts[i - 1]) / typical) * 3 + 10) restarts++; // jump too big for the time gap: restart
+    else if (d > 1) gaps.push({ at: s.ts[i], lastSeenAt: s.ts[i - 1], afterSeq: s.v[i - 1], nextSeq: s.v[i], missed: d - 1 });
+    else if (d < 0) restarts++;
+  }
+  const missed = gaps.reduce((a, g) => a + g.missed, 0), received = s.v.length;
+  return { topic: seqTopic, received, missed, lossPct: received + missed ? (missed / (received + missed)) * 100 : 0, restarts, gaps };
+}
+function gapSummaryHtml(g, label = "") {
+  if (!g || !g.received) return "";
+  if (!g.missed) return `<div class="gap-summary small">✓ No missed messages${label}</div>`;
+  const big = g.gaps.reduce((a, x) => (!a || x.missed > a.missed ? x : a), null);
+  const title = g.gaps.slice(-8).map((x) => `${new Date(x.at).toLocaleTimeString()}: seq ${x.afterSeq} → ${x.nextSeq} (${x.missed} missed)`).join("&#10;");
+  return `<div class="gap-summary bad small" title="${title}">⚠ ${g.missed} missed of ${g.missed + g.received} (${g.lossPct.toFixed(1)}%) · ${g.gaps.length} gap${g.gaps.length === 1 ? "" : "s"}${big && big.missed > 1 ? ` · longest ${Math.round((big.at - big.lastSeenAt) / 1000)} s` : ""}${label}</div>`;
 }
 const docOf = (id) => [...docs.keys()].find((d) => id === d || id.startsWith(d + "/"));
 const lastOf = (t) => ({ value: t.v[t.v.length - 1], ts: t.ts[t.ts.length - 1] });
@@ -769,6 +818,18 @@ function makeTools(onCall) {
       out.sort((a, b) => Math.abs(b.peakZ) - Math.abs(a.peakZ));
       return { from: iso(from), to: iso(to), count: out.length, findings: out.slice(0, 30) };
     }),
+    tool("check_sequence_gaps", "Find missed (dropped) messages using sequence numbers. Works on topics carrying a seq field, e.g. the filler counters at acme/dublin/packaging/+/filler/counts. Returns per topic received vs missed, loss %, the longest gap and recent gaps. Use for data quality, 'did we lose any data' or 'can I trust these counts' questions.", { type: "object", properties: { filter: { type: "string", description: "Topic or MQTT filter (default all)." }, ...winProps, max_gaps: { type: "number", description: "Gaps to list per topic, most recent first (default 10)." } } }, (i) => {
+      const { from, to } = win(i);
+      const seqTopics = [...new Set([...matchTopics(String(i.filter || "#")).map((t) => t.topic), ...[...docs.keys()].filter((d) => mqttMatch(String(i.filter || "#"), d))].map(seqSource).filter(Boolean))];
+      if (!seqTopics.length) return { note: "No topics with a sequence number match that filter." };
+      return { from: iso(from), to: iso(to), topics: seqTopics.map((st) => {
+        const g = seqGaps(st, from, to);
+        const big = g.gaps.reduce((a, x) => (!a || x.missed > a.missed ? x : a), null);
+        return { topic: st.replace(/\/[^/]+$/, ""), received: g.received, missed: g.missed, lossPct: r3(g.lossPct, 2), restarts: g.restarts, gapCount: g.gaps.length,
+          longestGap: big && { at: iso(big.at), missed: big.missed, seconds: r3((big.at - big.lastSeenAt) / 1000, 1) },
+          recentGaps: g.gaps.slice(-(Number(i.max_gaps) || 10)).reverse().map((x) => ({ at: iso(x.at), afterSeq: x.afterSeq, nextSeq: x.nextSeq, missed: x.missed })) };
+      }).sort((a, b) => b.missed - a.missed) };
+    }),
     tool("get_json_document", "Latest full nested JSON document for a document topic (work orders, batch records, robot and boiler diagnostics). Each field is also its own topic at <document topic>/<json path>, with history.", { type: "object", properties: { topic: { type: "string" } }, required: ["topic"] }, (i) => {
       const d = docs.get(String(i.topic));
       if (!d) throw new Error(`Not a JSON document topic. Documents: ${[...docs.keys()].join(", ")}`);
@@ -833,7 +894,7 @@ function zoomControls(win, rerender, compact = false) {
   };
   return el;
 }
-function drawChart(el, topics, from, to, height = 200, onZoom) {
+function drawChart(el, topics, from, to, height = 200, onZoom, markers = []) {
   el.innerHTML = "";
   const groups = d3.groups(topics, (t) => store.get(t)?.unit ?? "");
   for (const [unit, ts] of groups) {
@@ -853,6 +914,7 @@ function drawChart(el, topics, from, to, height = 200, onZoom) {
     svg.append("g").attr("transform", `translate(${m.l},0)`).call(d3.axisLeft(y).ticks(4).tickSize(-(W - m.l - m.r)))
       .call((g) => g.select(".domain").remove()).call((g) => g.selectAll("line").attr("stroke", "var(--line)")).call((g) => g.selectAll("text").attr("fill", "var(--muted)").attr("font-size", 11));
     if (unit) svg.append("text").attr("x", m.l).attr("y", 10).attr("fill", "var(--muted)").attr("font-size", 11).text(unit);
+    for (const t of markers) if (t >= from && t <= to) svg.append("line").attr("x1", x(t)).attr("x2", x(t)).attr("y1", m.t).attr("y2", H - m.b).attr("stroke", "var(--critical)").attr("stroke-dasharray", "3 3").attr("opacity", 0.8);
     const line = d3.line().x((p) => x(p.ts)).y((p) => y(p.avg)).curve(d3.curveMonotoneX);
     for (const s of series) {
       svg.append("path").datum(s.pts).attr("fill", "none").attr("stroke", s.color).attr("stroke-width", 2).attr("stroke-linejoin", "round").attr("d", line);
@@ -1240,7 +1302,7 @@ function rawCard(topic) {
   c.className = "card";
   c.innerHTML = `<div class="card-head"><div class="mono small"></div><button class="icon-btn" data-a="close" aria-label="Close card">✕</button></div>
     <div class="small muted">{ } Raw JSON · ${fields} fields · updated ${Math.max(0, Math.round((Date.now() - updated) / 1000))} s ago</div>
-    <pre class="json-view">${jsonHtml(d)}</pre>
+    <pre class="json-view">${jsonHtml(d)}</pre>${seqSource(topic) ? gapSummaryHtml(seqGaps(seqSource(topic), Date.now() - 15 * 60_000, Date.now()), " · last 15 min") : ""}
     <div class="card-foot"><span class="small muted">${ratePerMin(store.get([...store.keys()].find((k) => k.startsWith(topic + "/"))))} msg/min</span><span class="btns"><button class="btn mini" data-a="copy">Copy</button> <button class="btn mini" data-a="ask">Ask</button></span></div>`;
   c.querySelector(".mono").textContent = topic.split("/").slice(-3).join("/");
   c.querySelector(".mono").title = topic;
@@ -1282,8 +1344,10 @@ function renderDetail() {
     c.querySelector('[data-a="ask"]').onclick = () => { $("input").value = `What has ${topic} been doing over the last hour?`; $("input").focus(); };
     c.querySelector(".seg").onclick = (e) => { const b = e.target.closest("button"); if (b) { win.setMinutes(Number(b.dataset.m)); renderDetail(); } };
     list.appendChild(c);
-    if (t.numeric) drawChart(c.querySelector(".dchart"), [topic], from, to, 110, (f, tt) => { win.set(f, tt); renderDetail(); });
+    const sq = seqSource(topic), gaps = sq && seqGaps(sq, from, to);
+    if (t.numeric) drawChart(c.querySelector(".dchart"), [topic], from, to, 110, (f, tt) => { win.set(f, tt); renderDetail(); }, gaps ? gaps.gaps.map((g) => g.at) : []);
     else drawStates(c.querySelector(".dchart"), [topic], from, to);
+    if (gaps) c.querySelector(".dchart").insertAdjacentHTML("afterend", gapSummaryHtml(gaps));
     c.querySelector(".dchart").after(zoomControls(win, renderDetail, true));
   }
   list.scrollTop = scroll;
@@ -1394,6 +1458,7 @@ const SUGGESTIONS = [
   "When did packaging line 1 last go down, and for how long?",
   "Chart the oven zone temperatures for the last hour",
   "Which motors are running hottest right now?",
+  "Have we missed any filler counter messages in the last hour?",
 ];
 let turns = [];
 let sample = null, sampleChecked = false, busy = false, ctl = null;
@@ -1402,7 +1467,7 @@ function instructions() {
   const topics = [...store.values()].sort((a, b) => a.topic.localeCompare(b.topic)).map((t) => `${t.topic}${t.unit ? ` [${t.unit}]` : ""}${t.numeric ? "" : " (text)"}`).join("\n");
   return `You are the assistant inside an MQTT broker dashboard. Answer questions about what is happening on the broker now and over the recorded history (up to 180 minutes), using the tools to read real data. Never invent values; if the data doesn't show something, say so.
 
-The broker is a Unified Namespace laid out to ISA-95: enterprise/site/area/line/cell/tag. It is a simulated food and beverage plant (packaging lines, mixers, an oven, CIP and utilities) running in the browser, with faults injected now and then. Some topics carry nested JSON documents (MES work orders per line, mixer batch records, a palletizer robot, boiler diagnostics). Each document is split into field topics at <document topic>/<json path>, e.g. acme/dublin/utilities/boiler/diagnostics/drum/pressure, each with its own history: numeric fields work with get_history and get_stats, text fields with get_state_changes, and get_json_document returns a whole document.
+The broker is a Unified Namespace laid out to ISA-95: enterprise/site/area/line/cell/tag. It is a simulated food and beverage plant (packaging lines, mixers, an oven, CIP and utilities) running in the browser, with faults injected now and then. Some topics carry nested JSON documents (MES work orders per line, mixer batch records, a palletizer robot, boiler diagnostics). Each document is split into field topics at <document topic>/<json path>, e.g. acme/dublin/utilities/boiler/diagnostics/drum/pressure, each with its own history: numeric fields work with get_history and get_stats, text fields with get_state_changes, and get_json_document returns a whole document. The filler counter documents (packaging/<line>/filler/counts) carry a seq number per message and some messages are lost on purpose; use check_sequence_gaps for questions about missed or dropped data.
 
 How to work:
 - Prefer get_stats and find_anomalies for broad questions, get_history for one signal, get_state_changes for states, alarms and batch phases. Use exact topic names from the list below.
