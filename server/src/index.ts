@@ -1,0 +1,156 @@
+import fs from "node:fs";
+import http from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import express from "express";
+import { WebSocketServer, WebSocket } from "ws";
+import { startEmbeddedBroker } from "./broker.js";
+import { chat, resetSession, type ChatEvent } from "./chat.js";
+import { config } from "./config.js";
+import { startInflux } from "./influx.js";
+import { startPredictor } from "./predictor.js";
+import { startRecorder } from "./recorder.js";
+import { spc, specFor, type SpcChart } from "./spc.js";
+import { Store, type TopicInfo } from "./store.js";
+
+const embedded = config.mqttUrl ? null : await startEmbeddedBroker(config.embeddedPort);
+const store = new Store(config.dbPath, config.retentionMinutes);
+const influx = startInflux();
+const recorder = startRecorder(store, influx);
+// Baseline network-drift predictor; publishes <area>/network/prediction back to the broker.
+if (process.env.PREDICTOR !== "off") startPredictor(store, recorder.client);
+
+const app = express();
+app.use(express.json());
+
+const topicRow = (t: TopicInfo) => ({
+  topic: t.topic, value: t.lastValue, payload: t.doc ? t.lastPayload : t.lastPayload.slice(0, 300), unit: t.unit,
+  lastTs: t.lastTs, rate: Math.round(t.rate * 10) / 10, count: t.count,
+  ...(t.doc ? { doc: true } : t.source ? { source: t.source } : {}),
+});
+
+app.get("/api/status", (_req, res) => {
+  res.json({
+    broker: recorder.status,
+    embeddedBroker: embedded ? { clients: embedded.clients() } : null,
+    topicCount: [...store.topics.values()].filter((t) => !t.source).length,
+    fieldCount: [...store.topics.values()].filter((t) => t.source).length,
+    messagesPerSecond: store.messagesPerSecond(),
+    totalMessages: store.totalMessages,
+    historyFrom: store.oldestTs(),
+    retentionMinutes: config.retentionMinutes,
+    influx: influx ? { ...influx.status, enabled: true } : { enabled: false },
+    model: config.model,
+    chatEnabled: !!(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN),
+  });
+});
+
+app.get("/api/topics", (_req, res) => {
+  res.json([...store.topics.values()].map(topicRow));
+});
+
+app.get("/api/throughput", (_req, res) => {
+  res.json(store.throughput);
+});
+
+app.get("/api/history", (req, res) => {
+  const topics = ([] as string[]).concat((req.query.topic as string | string[]) ?? []);
+  const to = req.query.to ? Number(req.query.to) : Date.now();
+  const from = req.query.from ? Number(req.query.from) : to - Number(req.query.minutes ?? 60) * 60_000;
+  const points = Math.min(1000, Number(req.query.points ?? 300));
+  res.json(Object.fromEntries(topics.map((t) => [t, store.history(t, from, to, points)])));
+});
+
+// Missed messages from sequence-number jumps.
+app.get("/api/gaps", (req, res) => {
+  const to = Number(req.query.to) || Date.now();
+  const from = Number(req.query.from) || to - 60 * 60_000;
+  res.json(store.sequenceGaps(String(req.query.topic ?? ""), from, to));
+});
+
+// SPC chart: control limits, rule violations and capability for a numeric topic.
+app.get("/api/spc", (req, res) => {
+  const topic = String(req.query.topic ?? "");
+  const to = Number(req.query.to) || Date.now();
+  const from = Number(req.query.from) || to - 60 * 60_000;
+  const num = (k: string) => (req.query[k] != null && req.query[k] !== "" && Number.isFinite(Number(req.query[k])) ? Number(req.query[k]) : undefined);
+  const spec = specFor(topic);
+  res.json(
+    spc(store.values(topic, from, to), {
+      ...spec,
+      chart: (["xbar-r", "xbar-s", "imr"] as SpcChart[]).find((c) => c === req.query.chart) ?? "xbar-r",
+      n: num("n"),
+      every: num("every"),
+      lsl: num("lsl") ?? spec.lsl,
+      usl: num("usl") ?? spec.usl,
+      target: num("target") ?? spec.target,
+    }),
+  );
+});
+
+// State changes for text topics, for the state timeline chart.
+app.get("/api/changes", (req, res) => {
+  const topics = ([] as string[]).concat((req.query.topic as string | string[]) ?? []);
+  const to = Number(req.query.to) || Date.now();
+  const from = Number(req.query.from) || to - 60 * 60_000;
+  res.json(Object.fromEntries(topics.map((t) => [t, store.changes(t, from, to, 1000)])));
+});
+
+app.post("/api/chat", async (req, res) => {
+  const { sessionId, message } = req.body as { sessionId?: string; message?: string };
+  if (!sessionId || !message) {
+    res.status(400).json({ error: "sessionId and message are required" });
+    return;
+  }
+  res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+  const abort = new AbortController();
+  res.on("close", () => abort.abort());
+  const emit = (e: ChatEvent) => res.write(`data: ${JSON.stringify(e)}\n\n`);
+  try {
+    await chat(sessionId, message, { store, recorder: recorder.status }, emit, abort.signal);
+  } catch (err) {
+    if (!abort.signal.aborted) emit({ type: "error", message: err instanceof Error ? err.message : String(err) });
+  }
+  res.end();
+});
+
+app.post("/api/chat/reset", (req, res) => {
+  resetSession(String(req.body?.sessionId ?? ""));
+  res.json({ ok: true });
+});
+
+// Serve the built frontend when it exists (npm run build && npm start).
+const webDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../web/dist");
+if (fs.existsSync(webDist)) {
+  app.use(express.static(webDist));
+  app.get(/^\/(?!api|ws).*/, (_req, res) => res.sendFile(path.join(webDist, "index.html")));
+}
+
+const server = http.createServer(app);
+
+// Live feed: a full snapshot on connect, then changed topics once a second.
+const wss = new WebSocketServer({ server, path: "/ws" });
+let lastPush = Date.now();
+wss.on("connection", (ws) => {
+  ws.send(JSON.stringify({ type: "snapshot", topics: [...store.topics.values()].map(topicRow), mps: store.messagesPerSecond(), ts: Date.now() }));
+});
+setInterval(() => {
+  const since = lastPush;
+  lastPush = Date.now();
+  if (!wss.clients.size) return;
+  const changed = [...store.topics.values()].filter((t) => t.lastTs > since).map(topicRow);
+  const msg = JSON.stringify({ type: "update", topics: changed, mps: store.messagesPerSecond(), ts: lastPush });
+  for (const c of wss.clients) if (c.readyState === WebSocket.OPEN) c.send(msg);
+}, 1000).unref();
+
+server.listen(config.port, () => {
+  console.log(`[server] API on http://localhost:${config.port}, recording ${recorder.status.url}`);
+});
+
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.once(sig, async () => {
+    recorder.client.end();
+    await influx?.close();
+    process.exit(0);
+  });
+}

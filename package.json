@@ -1,0 +1,16 @@
+{
+  "name": "broker-chatbot",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["server", "web"],
+  "scripts": {
+    "dev": "concurrently -k -n server,sim,web -c blue,magenta,green \"npm:dev -w server\" \"npm:sim -w server\" \"npm:dev -w web\"",
+    "dev:nosim": "concurrently -k -n server,web -c blue,green \"npm:dev -w server\" \"npm:dev -w web\"",
+    "sim": "npm run sim -w server",
+    "build": "npm run build -w server && npm run build -w web",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.6"
+  }
+}
