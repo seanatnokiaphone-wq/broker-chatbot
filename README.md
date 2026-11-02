@@ -5,7 +5,7 @@ Chat with a live MQTT broker. Ask questions about what's happening right now or 
 - **Recorder** subscribes to the broker (`#` by default) and keeps a rolling history (3 hours by default) in SQLite, plus a live in-memory topic tree.
 - **Chat assistant** uses Claude with tools over that data: overview, list topics, latest values, history, stats, state changes, anomaly scan, and inline charts.
 - **Vite + React UI** with a force-directed topic graph (nodes pulse as messages arrive, alarms turn red), a tree explorer with trend charts over 15 min / 1 h / 3 h, and the chat panel.
-- **Mock UNS generator** publishes 162 ISA-95 shaped tags (`acme/dublin/<area>/<line>/<cell>/<tag>`) across four packaging lines (each with filler, capper, labeler and palletizer), mixers, an oven, CIP and utilities, plus 12 nested JSON documents (including per-filler counters with sequence numbers), and per-area network health tags whose latency drifts every ~10 minutes, with a baseline predictor that forecasts the drift. Lines run state machines with OEE, and faults are injected every few minutes.
+- **Mock UNS generator** simulates eleven food and drink sites around Ireland (`acme/<site>/<area>/<line>/<cell>/<tag>`): 1,164 ISA-95 shaped tags across 24 packaging lines, mixers and kettles, ovens, CIP and utilities, plus 87 nested JSON documents (including per-filler counters with sequence numbers), and per-area network health tags whose latency drifts every ~10 minutes, with a baseline predictor that forecasts the drift. Lines run state machines with OEE, and faults are injected every few minutes.
 
 ```
 ┌───────────────┐   MQTT    ┌──────────────────────────── server ─────────────────────────────┐
@@ -71,6 +71,24 @@ from(bucket: "uns")
 
 Writes are batched (flushed every second, up to 50k points buffered with retries), so an Influx outage never blocks recording. Write counts and the last error show under `influx` in `/api/status`. Change the compose password and token before using it anywhere shared.
 
+## Sites
+
+| Site | Sector | Lines (rated bpm) | Processing |
+|---|---|---|---|
+| dublin | Soft drinks | line1 120, line2 100 (robot), line3 150, line4 90 | mixer1, mixer2, 3-zone oven, CIP |
+| cork | Dairy | line1 140, line2 110, line3 80 (no capper) | pasteuriser1, culture_tank1, CIP |
+| galway | Spring water | line1 220 (robot), line2 180 | CIP |
+| limerick | Bakery | line1 60, line2 95 (no cappers) | dough_mixer1, dough_mixer2, 3-zone oven |
+| waterford | Juice | line1 100, line2 130 | blend_tank1, CIP |
+| kilkenny | Brewery | line1 160 (robot), line2 70 | brew_kettle1, brew_kettle2, CIP |
+| sligo | Snacks | line1 110 (no capper) | seasoning_drum1, 2-zone oven |
+| athlone | Soft drinks | line1 140 (robot), line2 120, line3 90 | syrup_room1, CIP |
+| drogheda | Dairy desserts | line1 85, line2 70 (no cappers) | cook_kettle1, cook_kettle2, CIP |
+| letterkenny | Ready meals | line1 45 (no capper) | sauce_kettle1, 2-zone oven, CIP |
+| tralee | Sauces | line1 75, line2 60 | batch_kettle1, emulsifier1, CIP |
+
+Each site also has utilities (one or two compressors, a boiler at most sites, power, chiller, water), network health per area, and `acme/<site>/info`, a JSON document with its county, coordinates, sector and products. Dublin is the busiest; the other sites publish at half its rate and get random faults less often. Edit `server/src/simulator/sites.ts` to add or change sites and lines (the demo carries a copy of the same list).
+
 ## Nested JSON payloads
 
 Most tags publish the usual `{"value": 52.1, "unit": "°C", "quality": "GOOD", "timestamp": …}` envelope. Any other JSON object is treated as a document and split into one **field topic** per leaf, at `<document topic>/<json path>`:
@@ -86,7 +104,7 @@ Each field gets its own history, so it can be trended, searched, shown in the gr
 
 ## Sequence numbers and missed data
 
-Each packaging line's filler publishes `acme/dublin/packaging/<line>/filler/counts` once a second:
+Each packaging line's filler publishes `acme/<site>/packaging/<line>/filler/counts` (once a second in Dublin):
 
 ```json
 {"seq": 18234, "good_count": 40330, "reject_count": 162, "total_count": 40492, "state": "Filling", "timestamp": "…"}
@@ -96,7 +114,7 @@ The simulator loses some of these on purpose: about 1% at random, plus a network
 
 ## Network drift prediction
 
-Each area (packaging, processing, utilities) publishes network health under `acme/dublin/<area>/network/`: `latency_ms` and `jitter_ms` every second, `packet_loss_pct` and `throughput_mbps` every 2 s, `retransmits_per_min` and `link_state` every 5 s. Latency normally sits around 2500 ms (0 to 5000), but roughly every 10 minutes it drifts out to about 9000 ms for a few minutes. Most drifts (85%) come with early-warning signs one to three minutes beforehand: jitter, packet loss and retransmits creep up and throughput sags.
+Each area (packaging, processing, utilities) publishes network health under `acme/<site>/<area>/network/` (Dublin's rates; the other sites publish half as often): `latency_ms` and `jitter_ms` every second, `packet_loss_pct` and `throughput_mbps` every 2 s, `retransmits_per_min` and `link_state` every 5 s. Latency normally sits around 2500 ms (0 to 5000), but roughly every 10 minutes it drifts out to about 9000 ms for a few minutes. Most drifts (85%) come with early-warning signs one to three minutes beforehand: jitter, packet loss and retransmits creep up and throughput sags.
 
 `server/src/predictor.ts` (baseline-v1) runs every 5 s per area and combines three signals into a drift risk:
 
@@ -104,7 +122,7 @@ Each area (packaging, processing, utilities) publishes network health under `acm
 - **Trend:** the latency slope over 90 s, projected 2 minutes ahead.
 - **Rhythm:** past drift onsets in the last hour give the typical period, so it knows when the next one is due.
 
-It publishes `acme/dublin/<area>/network/prediction` (status Normal / Watch / Drift likely / Drifting, `drift_risk_pct`, `forecast_2m_ms`, `next_drift_due_s`, the reasons) and scores itself: drifts seen, predicted in advance (risk ≥ 60% within 10 minutes before onset), missed, false alarms and median lead time. Because it is an ordinary JSON document, the risk can be trended next to latency in the cards, and the chat has a `predict_network_drift` tool. Set `PREDICTOR=off` to disable it. In a 70-minute simulated run it flagged all 20 drifts with a median lead of 75 to 125 s and a few false alarms. It is a deliberately simple baseline to compare a trained model against.
+It publishes `acme/<site>/<area>/network/prediction` (status Normal / Watch / Drift likely / Drifting, `drift_risk_pct`, `forecast_2m_ms`, `next_drift_due_s`, the reasons) and scores itself: drifts seen, predicted in advance (risk ≥ 60% within 10 minutes before onset), missed, false alarms and median lead time. Because it is an ordinary JSON document, the risk can be trended next to latency in the cards, and the chat has a `predict_network_drift` tool. Set `PREDICTOR=off` to disable it. In a 70-minute simulated run it flagged all 20 drifts with a median lead of 75 to 125 s and a few false alarms. It is a deliberately simple baseline to compare a trained model against.
 
 The simulator's random faults (and the demo's **Inject fault** menu) include network incidents: a drift that starts immediately with no early warning, a packet-loss storm that looks like a precursor but never becomes a drift (a false-alarm test), and a packaging link outage during which the network tags go quiet, the prediction reports No data, and filler counter messages are lost.
 
@@ -153,7 +171,7 @@ server/src
   tools.ts          Claude tool definitions and handlers
   chat.ts           Streaming tool-use loop
   broker.ts         Embedded aedes broker
-  simulator/        Mock ISA-95 plant (162 tags + 12 JSON documents)
+  simulator/        Mock ISA-95 sites (sites.ts: 11 sites, 1,164 tags + 87 JSON documents)
   predictor.ts      Baseline network-drift predictor
   spc.ts            SPC charts, Western Electric rules, capability
 web/src

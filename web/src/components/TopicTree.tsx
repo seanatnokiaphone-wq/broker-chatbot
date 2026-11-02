@@ -65,9 +65,9 @@ export function TopicTree({ live, selected, onSelect, focus }: Props) {
     walk(root, false);
     return s;
   };
-  // null = the default view, with cells folded so the first view fits on screen.
+  // null = the default view: sites and their areas, everything below folded, so eleven sites fit on screen.
   const [userCollapsed, setCollapsed] = useState<Set<string> | null>(null);
-  const collapsed = useMemo(() => userCollapsed ?? branchesFrom(4), [userCollapsed, root]);
+  const collapsed = useMemo(() => userCollapsed ?? branchesFrom(2), [userCollapsed, root]);
 
   // Filter by topic path or current value text, or by an MQTT filter with + / #.
   // While it's set, matching branches open and everything else is hidden.

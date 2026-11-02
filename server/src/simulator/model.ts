@@ -4,6 +4,8 @@
  * counters and OEE, and a fault scheduler injects incidents worth asking about.
  */
 
+import type { LineConfig, MixerConfig, SiteConfig } from "./sites.js";
+
 export type LineState = "Running" | "Idle" | "Down" | "Changeover";
 
 export interface Tag {
@@ -21,8 +23,6 @@ export interface Tag {
 export type JsonDoc = { [key: string]: string | number | boolean | JsonDoc | JsonDoc[] };
 
 const ENTERPRISE = "acme";
-const SITE = "dublin";
-const root = `${ENTERPRISE}/${SITE}`;
 
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
 const noise = (n: number) => (Math.random() - 0.5) * 2 * n;
@@ -75,28 +75,46 @@ interface Fault {
   until: number;
 }
 
+/** One site's plant, built from its configuration in sites.ts. */
 export class Plant {
   readonly tags: Tag[] = [];
   readonly faults: Fault[] = [];
   readonly lineStates = new Map<string, LineState>();
-  private nextFaultAt = Date.now() + 60_000;
+  readonly root: string;
+  private nextFaultAt: number;
+  private readonly faultPool: [string, string][] = [];
 
-  constructor() {
+  constructor(readonly cfg: SiteConfig) {
+    this.root = `${ENTERPRISE}/${cfg.id}`;
+    this.nextFaultAt = Date.now() + rand(1, cfg.faultEvery[0]) * 60_000;
     this.site();
-    this.packagingLine("line1", 120, 0);
-    this.packagingLine("line2", 100, 1.3);
-    this.packagingLine("line3", 150, 2.4);
-    this.packagingLine("line4", 90, 3.7);
-    this.mixer("mixer1", 0);
-    this.mixer("mixer2", 2.1);
-    this.oven();
-    this.cip();
+    cfg.lines.forEach((l, i) => this.packagingLine(l, i * 1.3));
+    cfg.mixers.forEach((m, i) => this.mixer(m, i * 2.1));
+    if (cfg.oven) this.oven(cfg.oven);
+    if (cfg.cip) this.cip();
     this.utilities();
-    ["packaging", "processing", "utilities"].forEach((area, i) => this.network(area, i));
+    const areas = ["packaging", ...(cfg.mixers.length || cfg.oven || cfg.cip ? ["processing"] : []), "utilities"];
+    areas.forEach((area, i) => this.network(area, i));
+    this.buildFaultPool(areas);
   }
 
   private add(topic: string, read: Tag["read"], unit?: string, every = 2, retain = false, drop?: Tag["drop"]) {
-    this.tags.push({ topic: `${root}/${topic}`, unit, every, retain, read, drop });
+    this.tags.push({ topic: `${this.root}/${topic}`, unit, every: every * this.cfg.rate, retain, read, drop });
+  }
+
+  /** Incidents worth asking about, limited to the equipment this site has. */
+  private buildFaultPool(areas: string[]) {
+    const { lines, mixers, oven, compressors } = this.cfg;
+    for (const l of lines) {
+      const n = l.id.replace("line", "Line ");
+      this.faultPool.push([`${n} filler motor overheating`, `packaging/${l.id}/filler/motor_temp`], [`${n} jam at labeler`, `packaging/${l.id}/state`]);
+      if (l.capper) this.faultPool.push([`${n} capper torque drift, rejects rising`, `packaging/${l.id}/capper/torque`]);
+    }
+    for (const m of mixers) this.faultPool.push([`${m.id} high motor current`, `processing/${m.id}/motor_current`]);
+    if (oven && oven.length > 1) this.faultPool.push(["Oven zone 2 temperature overshoot", "processing/oven1/zone2"]);
+    this.faultPool.push([`Compressor ${compressors} trip, air pressure dropping`, `utilities/compressed_air/compressor${compressors}`]);
+    for (const a of areas) this.faultPool.push([`Network latency drift now, no warning (${a})`, `${a}/network/drift`]);
+    this.faultPool.push(["Packet loss storm (utilities network)", "utilities/network/loss"], ["Network link down (packaging), filler data lost", "packaging/network/link"]);
   }
 
   fault(key: string) {
@@ -108,35 +126,35 @@ export class Plant {
   tick(now: number) {
     for (let i = this.faults.length - 1; i >= 0; i--) if (this.faults[i].until < now) this.faults.splice(i, 1);
     if (now >= this.nextFaultAt) {
-      const pool: [string, string][] = [
-        ["Filler motor overheating", "packaging/line2/filler/motor_temp"],
-        ["Line 1 jam at labeler", "packaging/line1/state"],
-        ["Compressor 2 trip, air pressure dropping", "utilities/compressed_air/compressor2"],
-        ["Oven zone 2 temperature overshoot", "processing/oven1/zone2"],
-        ["Mixer 1 high motor current", "processing/mixer1/motor_current"],
-        ["Capper torque drift on line 2", "packaging/line2/capper/torque"],
-        ["Line 3 filler motor overheating", "packaging/line3/filler/motor_temp"],
-        ["Line 4 jam at labeler", "packaging/line4/state"],
-        ["Network latency drift now, no warning (processing)", "processing/network/drift"],
-        ["Packet loss storm (utilities network)", "utilities/network/loss"],
-        ["Network link down (packaging), filler data lost", "packaging/network/link"],
-      ];
-      const [name, key] = pool[Math.floor(Math.random() * pool.length)];
+      const [name, key] = this.faultPool[Math.floor(Math.random() * this.faultPool.length)];
       const until = now + rand(120, 300) * 1000;
       this.faults.push({ name, key, until });
-      console.log(`[sim] fault injected: ${name} (${Math.round((until - now) / 1000)} s)`);
-      this.nextFaultAt = now + rand(240, 480) * 1000;
+      console.log(`[sim] ${this.cfg.name}: fault injected: ${name} (${Math.round((until - now) / 1000)} s)`);
+      this.nextFaultAt = now + rand(this.cfg.faultEvery[0], this.cfg.faultEvery[1]) * 60_000;
     }
   }
 
   private site() {
+    const c = this.cfg;
+    // West-coast sites run a little cooler and damper.
+    const west = Math.max(0, -6.3 - c.lon) / 3.4;
     this.add("shift", () => shiftOf(), undefined, 30, true);
-    this.add("headcount", () => 42 + Math.round(noise(3)), "people", 60, true);
-    this.add("environment/ambient_temp", (t) => round(18 + 3 * wave(t, 3600) + noise(0.2)), "°C", 10);
-    this.add("environment/humidity", (t) => round(55 + 8 * wave(t, 5400, 1) + noise(0.5)), "%RH", 10);
+    this.add("headcount", () => c.headcount + Math.round(noise(3)), "people", 60, true);
+    this.add("environment/ambient_temp", (t) => round(18 - 1.5 * west + 3 * wave(t, 3600, c.lat) + noise(0.2)), "°C", 10);
+    this.add("environment/humidity", (t) => round(55 + 10 * west + 8 * wave(t, 5400, 1 + c.lon) + noise(0.5)), "%RH", 10);
+    // Nested JSON: where the site is and what it makes.
+    this.add("info", () => ({
+      site: { id: c.id, name: c.name, county: c.county, country: "Ireland" },
+      location: { lat: c.lat, lon: c.lon },
+      sector: c.sector,
+      lines: c.lines.length,
+      products: c.lines.flatMap((l) => l.products.map((p) => p.sku)).join(", "),
+      processing: [...c.mixers.map((m) => m.id), ...(c.oven ? ["oven1"] : []), ...(c.cip ? ["cip"] : [])].join(", ") || "none",
+    }), undefined, 60, true);
   }
 
-  private packagingLine(line: string, ratedBpm: number, phase: number) {
+  private packagingLine(cfg: LineConfig, phase: number) {
+    const { id: line, ratedBpm } = cfg;
     const base = `packaging/${line}`;
     let state: LineState = "Running";
     let stateUntil = Date.now() + rand(300, 900) * 1000;
@@ -241,9 +259,11 @@ export class Plant {
       return { seq: ++seq, good_count: total - rejects, reject_count: rejects, total_count: total, state: state === "Running" ? "Filling" : "Stopped" };
     }), undefined, 1, false, lost);
 
-    this.add(`${base}/capper/torque`, s((t) => round((this.fault(`${base}/capper/torque`) ? 1.6 + 0.4 * wave(t, 60) : 2.2) + noise(0.05), 2)), "Nm", 2);
-    this.add(`${base}/capper/motor_temp`, motorTemp("capper", 48), "°C", 2);
-    this.add(`${base}/capper/cap_hopper_level`, s((t) => round(60 + 35 * wave(t, 1500, phase) + noise(1), 0)), "%", 5);
+    if (cfg.capper) {
+      this.add(`${base}/capper/torque`, s((t) => round((this.fault(`${base}/capper/torque`) ? 1.6 + 0.4 * wave(t, 60) : 2.2) + noise(0.05), 2)), "Nm", 2);
+      this.add(`${base}/capper/motor_temp`, motorTemp("capper", 48), "°C", 2);
+      this.add(`${base}/capper/cap_hopper_level`, s((t) => round(60 + 35 * wave(t, 1500, phase) + noise(1), 0)), "%", 5);
+    }
 
     this.add(`${base}/labeler/web_tension`, s(() => round(state === "Running" ? 85 + noise(3) : 20 + noise(1), 1)), "N", 2);
     this.add(`${base}/labeler/motor_temp`, motorTemp("labeler", 45), "°C", 2);
@@ -254,12 +274,7 @@ export class Plant {
     this.add(`${base}/palletizer/motor_temp`, motorTemp("palletizer", 42), "°C", 2);
 
     // Nested JSON: the MES work order running on the line.
-    const products = {
-      line1: [{ sku: "CL-330", name: "Cola 330ml can" }, { sku: "CL-500", name: "Cola 500ml PET" }],
-      line2: [{ sku: "LM-330", name: "Lemon 330ml can" }, { sku: "OR-1L", name: "Orange 1L PET" }],
-      line3: [{ sku: "WT-500", name: "Still water 500ml PET" }, { sku: "SP-500", name: "Sparkling water 500ml PET" }],
-      line4: [{ sku: "EN-250", name: "Energy 250ml can" }, { sku: "IT-330", name: "Iced tea 330ml glass" }],
-    }[line] ?? [{ sku: "GEN-330", name: "Generic 330ml" }];
+    const products = cfg.products;
     let wo = 24100 + Math.floor(rand(0, 50)), woStart = 0, target = 24000, product = products[0], lastState: LineState = state;
     this.add(`${base}/mes/work_order`, s(() => {
       if (!woStart) woStart = good;
@@ -275,12 +290,12 @@ export class Plant {
         order: { id: `WO-${wo}`, status: state === "Changeover" ? "Changeover" : produced >= target ? "Complete" : "In Progress" },
         product: { ...product, batch_size: target },
         progress: { produced, remaining: Math.max(0, target - produced), percent: round(Math.min(100, (produced / target) * 100), 1) },
-        operator: { name: ({ line1: "A. Byrne", line2: "C. Murphy", line3: "D. O'Neill", line4: "R. Quinn" } as Record<string, string>)[line] ?? "Unassigned", shift: shiftOf() },
+        operator: { name: cfg.operator, shift: shiftOf() },
         line_state: state,
       };
     }), undefined, 5, true);
 
-    if (line === "line2") {
+    if (cfg.robot) {
       // Nested JSON: the palletizer robot's controller snapshot, three levels deep.
       const axisTemp = [new Lag(38), new Lag(41), new Lag(36)];
       this.add(`${base}/palletizer/robot`, s((t) => ({
@@ -296,8 +311,8 @@ export class Plant {
     }
   }
 
-  private mixer(name: string, phase: number) {
-    const recipes = { mixer1: "Syrup base v3", mixer2: "Citrus concentrate v7" } as Record<string, string>;
+  private mixer(cfg: MixerConfig, phase: number) {
+    const name = cfg.id;
     const base = `processing/${name}`;
     const phases = ["Charging", "Mixing", "Heating", "Holding", "Discharging", "CIP"];
     const durations = [180, 420, 300, 240, 180, 240];
@@ -339,18 +354,17 @@ export class Plant {
       const p = current();
       const spTemp = p === "Heating" || p === "Holding" ? 72 : p === "CIP" ? 60 : 25;
       return {
-        batch: { id: `B-${batch}`, recipe: recipes[name] ?? "Base", phase: p, step: phases.indexOf(p) + 1, of_steps: phases.length },
+        batch: { id: `B-${batch}`, recipe: cfg.recipe, phase: p, step: phases.indexOf(p) + 1, of_steps: phases.length },
         setpoints: { temperature: { value: spTemp, unit: "°C" }, speed: { value: rpm(), unit: "rpm" } },
         actuals: { temperature: { value: round(temp.v, 1), unit: "°C" }, speed: { value: round(rpm() + noise(2), 0), unit: "rpm" }, level: { value: round(level.v, 1), unit: "%" } },
         quality: { brix: round(p === "Holding" || p === "Discharging" ? 11.2 + noise(0.15) : 0, 2), ph: round(3.2 + noise(0.05), 2), sample_status: p === "Holding" ? "Pending lab" : p === "Discharging" ? "Released" : "Not sampled" },
-        operator: name === "mixer1" ? "M. Walsh" : "S. Kelly",
+        operator: cfg.operator,
       };
     }, undefined, 5);
   }
 
-  private oven() {
+  private oven(sps: number[]) {
     const base = "processing/oven1";
-    const sps = [180, 210, 195];
     const zones = sps.map((sp) => new Lag(sp, 0.08));
     this.add(`${base}/state`, () => "Running", undefined, 10, true);
     sps.forEach((sp, i) => {
@@ -423,35 +437,40 @@ export class Plant {
     const base = "utilities";
     const pressure = new Lag(7.2, 0.1);
     const loadKw = () => [...this.lineStates.values()].filter((s) => s === "Running").length * 140 + 220;
-    let kwh = 1_250_000;
+    let kwh = 250_000 + this.cfg.headcount * 20_000;
     let water = 84_000;
+    // Losing the last compressor drops header pressure (and starves the boiler's burner controls).
+    const lastCompressor = `compressor${this.cfg.compressors}`;
 
-    for (const c of ["compressor1", "compressor2"]) {
+    for (let i = 1; i <= this.cfg.compressors; i++) {
+      const c = `compressor${i}`;
       const tripped = () => !!this.fault(`${base}/compressed_air/${c}`);
       this.add(`${base}/compressed_air/${c}/state`, () => (tripped() ? "Tripped" : "Running"), undefined, 5, true);
       this.add(`${base}/compressed_air/${c}/power`, (t) => round(tripped() ? 0 : 55 + 6 * wave(t, 200) + noise(1), 1), "kW", 2);
       this.add(`${base}/compressed_air/${c}/motor_temp`, (t) => round(tripped() ? 35 : 68 + 2 * wave(t, 500) + noise(0.4), 1), "°C", 5);
     }
     this.add(`${base}/compressed_air/header_pressure`, (t) => {
-      const lost = this.fault(`${base}/compressed_air/compressor2`) ? 1.6 : 0;
+      const lost = this.fault(`${base}/compressed_air/${lastCompressor}`) ? 1.6 : 0;
       return round(pressure.step(7.2 - lost + 0.1 * wave(t, 90)) + noise(0.03), 2);
     }, "bar", 1);
     this.add(`${base}/compressed_air/dew_point`, () => round(3 + noise(0.2), 1), "°C", 10);
 
-    this.add(`${base}/boiler/state`, () => "Running", undefined, 10, true);
-    this.add(`${base}/boiler/steam_pressure`, (t) => round(10 + 0.3 * wave(t, 180) + noise(0.05), 2), "bar", 2);
-    this.add(`${base}/boiler/water_level`, (t) => round(50 + 6 * wave(t, 240) + noise(0.5), 1), "%", 2);
-    this.add(`${base}/boiler/flue_temp`, (t) => round(190 + 6 * wave(t, 600) + noise(0.8), 1), "°C", 5);
-    // Nested JSON: boiler diagnostics. Health goes to Warning when the compressed-air trip starves the burner controls.
-    this.add(`${base}/boiler/diagnostics`, (t) => {
-      const warn = !!this.fault(`${base}/compressed_air/compressor2`);
-      return {
-        health: { status: warn ? "Warning" : "OK", score: round(warn ? 71 + noise(2) : 94 + noise(1), 1), message: warn ? "Low instrument air pressure at burner actuator" : "" },
-        burner: { flame: "On", firing_rate_pct: round(62 + 8 * wave(t, 180) + noise(1), 1), fuel: { flow: { value: round(41 + 3 * wave(t, 180) + noise(0.4), 1), unit: "m³/h" }, type: "Natural gas" } },
-        drum: { pressure: { value: round(10 + 0.3 * wave(t, 180) + noise(0.05), 2), unit: "bar" }, level: { value: round(50 + 6 * wave(t, 240) + noise(0.5), 1), unit: "%" } },
-        maintenance: { last_service: "2026-08-14", next_service: "2026-11-14", run_hours: Math.round(4120 + t / 3600) },
-      };
-    }, undefined, 5);
+    if (this.cfg.boiler) {
+      this.add(`${base}/boiler/state`, () => "Running", undefined, 10, true);
+      this.add(`${base}/boiler/steam_pressure`, (t) => round(10 + 0.3 * wave(t, 180) + noise(0.05), 2), "bar", 2);
+      this.add(`${base}/boiler/water_level`, (t) => round(50 + 6 * wave(t, 240) + noise(0.5), 1), "%", 2);
+      this.add(`${base}/boiler/flue_temp`, (t) => round(190 + 6 * wave(t, 600) + noise(0.8), 1), "°C", 5);
+      // Nested JSON: boiler diagnostics. Health goes to Warning when the compressed-air trip starves the burner controls.
+      this.add(`${base}/boiler/diagnostics`, (t) => {
+        const warn = !!this.fault(`${base}/compressed_air/${lastCompressor}`);
+        return {
+          health: { status: warn ? "Warning" : "OK", score: round(warn ? 71 + noise(2) : 94 + noise(1), 1), message: warn ? "Low instrument air pressure at burner actuator" : "" },
+          burner: { flame: "On", firing_rate_pct: round(62 + 8 * wave(t, 180) + noise(1), 1), fuel: { flow: { value: round(41 + 3 * wave(t, 180) + noise(0.4), 1), unit: "m³/h" }, type: "Natural gas" } },
+          drum: { pressure: { value: round(10 + 0.3 * wave(t, 180) + noise(0.05), 2), unit: "bar" }, level: { value: round(50 + 6 * wave(t, 240) + noise(0.5), 1), unit: "%" } },
+          maintenance: { last_service: "2026-08-14", next_service: "2026-11-14", run_hours: Math.round(4120 + t / 3600) },
+        };
+      }, undefined, 5);
+    }
 
     this.add(`${base}/power/main/active_power`, () => round(loadKw() + noise(8), 1), "kW", 2);
     this.add(`${base}/power/main/energy`, () => round((kwh += loadKw() / 1800), 1), "kWh", 10);

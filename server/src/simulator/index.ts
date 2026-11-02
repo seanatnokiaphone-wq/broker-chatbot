@@ -1,8 +1,10 @@
 import mqtt from "mqtt";
 import { brokerUrl, config } from "../config.js";
 import { Plant } from "./model.js";
+import { SITES } from "./sites.js";
 
-const plant = new Plant();
+const plants = SITES.map((site) => new Plant(site));
+const allTags = plants.flatMap((p) => p.tags);
 const url = brokerUrl();
 const client = mqtt.connect(url, {
   username: config.mqttUsername,
@@ -11,8 +13,8 @@ const client = mqtt.connect(url, {
   reconnectPeriod: 2000,
 });
 
-const docs = plant.tags.filter((t) => typeof t.read(0) === "object").length;
-console.log(`[sim] ${plant.tags.length - docs} UNS tags + ${docs} nested JSON documents, publishing to ${url}`);
+const docs = allTags.filter((t) => typeof t.read(0) === "object").length;
+console.log(`[sim] ${plants.length} sites, ${allTags.length - docs} UNS tags + ${docs} nested JSON documents, publishing to ${url}`);
 
 const start = Date.now();
 let timer: NodeJS.Timeout | undefined;
@@ -24,8 +26,8 @@ client.on("connect", () => {
   timer = setInterval(() => {
     const now = Date.now();
     const t = Math.floor((now - start) / 1000);
-    plant.tick(now);
-    for (const tag of plant.tags) {
+    for (const plant of plants) plant.tick(now);
+    for (const tag of allTags) {
       if (!first && t % tag.every !== 0) continue;
       const value = tag.read(t);
       if (tag.drop?.()) continue; // simulated lost message

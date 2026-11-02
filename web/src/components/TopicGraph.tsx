@@ -1,4 +1,5 @@
 import { Search, X } from "lucide-react";
+import { cluster, hierarchy } from "d3-hierarchy";
 import { useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D, { type ForceGraphMethods, type NodeObject } from "react-force-graph-2d";
 import { docOf, docTopics, graphTopics, isAlarm, type Focus, type TopicRow } from "../api";
@@ -66,7 +67,18 @@ export function TopicGraph({ live, selected, onSelect, focus }: Props) {
       });
       nodes.get(topic)!.leaf = true;
     }
-    return { nodes: [...nodes.values()], links };
+    // Start from a radial tree (one spoke per site) so the force layout settles quickly on thousands of nodes.
+    const all = [...nodes.values()];
+    const kids = new Map<string, GNode[]>();
+    for (const l of links) kids.set(l.source, [...(kids.get(l.source) ?? []), nodes.get(l.target)!]);
+    const roots = all.filter((n) => n.depth === 0);
+    if (roots.length) {
+      const h = hierarchy<GNode>(roots.length === 1 ? roots[0] : ({ id: "", name: "", depth: -1, leaf: false, children: 0, json: false } as GNode), (n) => (n.depth < 0 ? roots : kids.get(n.id)));
+      const R = Math.max(300, (h.leaves().length * 5) / (2 * Math.PI));
+      cluster<GNode>().size([2 * Math.PI, R])(h);
+      h.each((d) => Object.assign(d.data, { x: (d.y ?? 0) * Math.cos(d.x ?? 0), y: (d.y ?? 0) * Math.sin(d.x ?? 0) }));
+    }
+    return { nodes: all, links };
   }, [topicKey, docKey]);
 
   // Whether the layout has settled since the graph last changed, so zooming to a node lands where it stays.
@@ -171,9 +183,11 @@ export function TopicGraph({ live, selected, onSelect, focus }: Props) {
             ctx.lineWidth = 1.5 / scale;
             ctx.stroke();
           }
-          const showLabel = (!n.leaf && !dim) || (hit && (hits!.tags.size <= 20 || scale > 2.2)) || (!hits && scale > 2.2) || selected.has(n.id);
+          // Enterprise and sites always; areas and lines once zoomed in a little; cells and tags when zoomed in close.
+          const branchShown = n.depth <= 1 || (n.depth <= 3 && scale > 1.1) || scale > 2.2;
+          const showLabel = (!n.leaf && !dim && branchShown) || (hit && (hits!.tags.size <= 20 || scale > 2.2)) || (!hits && scale > 2.2) || selected.has(n.id);
           if (showLabel) {
-            const fontSize = Math.max(n.leaf ? 2.5 : 3.5, (n.leaf ? 10 : 12 - n.depth) / scale);
+            const fontSize = n.depth <= 1 ? (14 - n.depth) / scale : Math.max(n.leaf ? 2.5 : 3.5, (n.leaf ? 10 : 12 - n.depth) / scale);
             ctx.font = `${n.leaf ? 400 : 600} ${fontSize}px Inter, sans-serif`;
             ctx.textAlign = "center";
             ctx.textBaseline = "top";

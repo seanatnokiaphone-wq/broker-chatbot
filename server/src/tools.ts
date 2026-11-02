@@ -72,7 +72,7 @@ const definitions = [
       const topics = [...store.topics.values()];
       const branches = new Map<string, number>();
       for (const t of topics) {
-        const key = t.topic.split("/").slice(0, 3).join("/");
+        const key = t.topic.split("/").slice(0, 3).join("/"); // enterprise/site
         branches.set(key, (branches.get(key) ?? 0) + 1);
       }
       return {
@@ -230,11 +230,11 @@ const definitions = [
       name: "predict_network_drift",
       description:
         "Current network-drift prediction for each area (from the baseline predictor publishing <area>/network/prediction): status, drift risk %, latency now and 2-minute forecast, when the next drift is due, the reasons, and the predictor's own track record (drifts seen, predicted in advance, missed, false alarms, median warning lead time). Use for questions about network latency drift, whether a drift is coming, or how good the prediction is. For history of the risk, use get_history on <area>/network/prediction/drift_risk_pct.",
-      input_schema: { type: "object", properties: { area: { type: "string", description: "Optional area name, e.g. packaging." } } },
+      input_schema: { type: "object", properties: { site: { type: "string", description: "Optional site id, e.g. cork." }, area: { type: "string", description: "Optional area name, e.g. packaging." } } },
     },
-    schema: z.object({ area: z.string().optional() }),
-    run: ({ area }, { store }) => {
-      const preds = store.match("#").filter((t) => t.doc && t.topic.endsWith("/network/prediction") && (!area || t.topic.includes(`/${area}/`)));
+    schema: z.object({ site: z.string().optional(), area: z.string().optional() }),
+    run: ({ site, area }, { store }) => {
+      const preds = store.match("#").filter((t) => t.doc && t.topic.endsWith("/network/prediction") && (!site || t.topic.split("/")[1] === site.toLowerCase()) && (!area || t.topic.includes(`/${area}/`)));
       if (!preds.length) return { note: "No predictions yet. The predictor needs a minute or two of network data, and several drifts before its rhythm signal kicks in." };
       return {
         method: "baseline-v1: early-warning z-scores (jitter, packet loss, retransmits, throughput vs 30-min median/MAD), latency trend projected 2 min, and the learned drift rhythm, combined into one risk. Drift = latency above 5000 ms.",
@@ -281,7 +281,7 @@ const definitions = [
     run: ({ filter, chart, n, every, lsl, usl, target, max_violations, ...w }, { store }) => {
       const { from, to } = resolveWindow(w);
       const results = [];
-      for (const t of store.match(filter).filter((x) => x.lastValue != null).slice(0, 12)) {
+      for (const t of store.match(filter).filter((x) => x.lastValue != null).slice(0, 30)) {
         const spec = specFor(t.topic);
         const res = spc(store.values(t.topic, from, to), { ...spec, chart, n, every, lsl: lsl ?? spec.lsl, usl: usl ?? spec.usl, target: target ?? spec.target });
         if (!res) {
